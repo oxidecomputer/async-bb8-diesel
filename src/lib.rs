@@ -78,14 +78,6 @@ impl<T: Send + 'static> DieselConnectionManager<T> {
             // Intentionally panic if the inner closure panics.
             .unwrap()
     }
-
-    // TODO: I'd really like to remove this function.
-    async fn run_blocking_in_place<R, F>(&self, f: F) -> R
-    where
-        F: FnOnce(&r2d2::ConnectionManager<T>) -> R,
-    {
-        task::block_in_place(|| f(&*self.inner.lock().unwrap()))
-    }
 }
 
 #[async_trait]
@@ -106,8 +98,9 @@ where
         &self,
         conn: &mut bb8::PooledConnection<'_, Self>,
     ) -> Result<(), Self::Error> {
-        self.run_blocking_in_place(|m| {
-            m.is_valid(&mut *conn.inner())?;
+        let c = DieselConnection(conn.0.clone());
+        self.run_blocking(move |m| {
+            m.is_valid(&mut *c.inner())?;
             Ok(())
         })
         .await
@@ -127,15 +120,8 @@ where
 /// These connections are created by [`DieselConnectionManager`].
 ///
 /// All blocking methods within this type delegate to
-/// [`tokio::task::block_in_place`]. The number of threads is not unbounded,
-/// however, as they are controlled by the truly asynchronous [`bb8::Pool`]
-/// owner.  This type makes it easy to use diesel without fear of blocking the
-/// runtime and without fear of spawning too many child threads.
-///
-/// Note that trying to construct this type via
-/// [`diesel::connection::Connection::establish`] will return an error.
-///
-/// The only correct way to construct this type is by using a bb8 pool.
+/// [`tokio::task::spawn_blocking`], meaning they won't block
+/// any asynchronous work or threads.
 pub struct DieselConnection<C>(pub(crate) Arc<Mutex<C>>);
 
 impl<C> DieselConnection<C> {
@@ -143,6 +129,10 @@ impl<C> DieselConnection<C> {
         Self(Arc::new(Mutex::new(c)))
     }
 
+    // Accesses the underlying connection.
+    //
+    // As this is a blocking mutext, it's recommended to avoid invoking
+    // this function from an asynchronous context.
     fn inner(&self) -> std::sync::MutexGuard<'_, C> {
         self.0.lock().unwrap()
     }
@@ -183,11 +173,9 @@ where
         let self_ = self.clone();
         let query = query.to_string();
         let conn = self_.get_owned().await.unwrap(); //map_err(|_| AsyncError::Checkout)?;
-        task::spawn_blocking(move || {
-            conn.inner().batch_execute(&query)
-        })
-        .await
-        .unwrap() // Propagate panics
+        task::spawn_blocking(move || conn.inner().batch_execute(&query))
+            .await
+            .unwrap() // Propagate panics
     }
 }
 
@@ -221,11 +209,9 @@ where
     {
         let self_ = self.clone();
         let conn = self_.get_owned().await.unwrap(); //map_err(|_| AsyncError::Checkout)?;
-        task::spawn_blocking(move || {
-            f(&mut *conn.inner())
-        })
-        .await
-        .unwrap() // Propagate panics
+        task::spawn_blocking(move || f(&mut *conn.inner()))
+            .await
+            .unwrap() // Propagate panics
     }
 
     #[inline]
