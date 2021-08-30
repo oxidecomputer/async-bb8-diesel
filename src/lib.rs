@@ -11,7 +11,7 @@ use diesel::{
     dsl::Limit,
     query_dsl::{
         methods::{ExecuteDsl, LimitDsl, LoadQuery},
-        RunQueryDsl, SaveChangesDsl, UpdateAndFetchResults,
+        RunQueryDsl,
     },
     r2d2::{self, ManageConnection, R2D2Connection},
     QueryResult,
