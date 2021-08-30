@@ -5,17 +5,13 @@
 //! API, with calls to [`tokio::task::spawn_blocking`] to safely
 //! perform synchronous operations from an asynchronous task.
 
-#[allow(unused_imports)]
-#[macro_use]
-extern crate diesel;
-
 use async_trait::async_trait;
 use diesel::{
     connection::{Connection, SimpleConnection},
     dsl::Limit,
     query_dsl::{
         methods::{ExecuteDsl, LimitDsl, LoadQuery},
-        RunQueryDsl,
+        RunQueryDsl, SaveChangesDsl, UpdateAndFetchResults,
     },
     r2d2::{self, ManageConnection, R2D2Connection},
     QueryResult,
@@ -27,10 +23,7 @@ use tokio::task;
 /// integrate with bb8.
 ///
 /// ```no_run
-/// #[macro_use]
-/// extern crate diesel;
-///
-/// use bb8_diesel::AsyncRunQueryDsl;
+/// use async_bb8_diesel::AsyncRunQueryDsl;
 /// use diesel::prelude::*;
 /// use diesel::pg::PgConnection;
 ///
@@ -45,7 +38,7 @@ use tokio::task;
 ///     use users::dsl;
 ///
 ///     // Creates a Diesel-specific connection manager for bb8.
-///     let mgr = bb8_diesel::DieselConnectionManager::<PgConnection>::new("localhost:1234");
+///     let mgr = async_bb8_diesel::DieselConnectionManager::<PgConnection>::new("localhost:1234");
 ///     let pool = bb8::Pool::builder().build(mgr).await.unwrap();
 ///
 ///     diesel::insert_into(dsl::users)
@@ -172,6 +165,7 @@ where
     async fn batch_execute_async(&self, query: &str) -> AsyncResult<()> {
         let self_ = self.clone();
         let query = query.to_string();
+        // TODO: Connection-based error translation.
         let conn = self_.get_owned().await.unwrap(); //map_err(|_| AsyncError::Checkout)?;
         task::spawn_blocking(move || conn.inner().batch_execute(&query))
             .await
@@ -208,6 +202,7 @@ where
         Func: FnOnce(&mut Conn) -> QueryResult<R> + Send + 'static,
     {
         let self_ = self.clone();
+        // TODO: Connection-based error translation.
         let conn = self_.get_owned().await.unwrap(); //map_err(|_| AsyncError::Checkout)?;
         task::spawn_blocking(move || f(&mut *conn.inner()))
             .await
@@ -221,6 +216,7 @@ where
         Func: FnOnce(&mut Conn) -> QueryResult<R> + Send + 'static,
     {
         let self_ = self.clone();
+        // TODO: Connection-based error translation.
         let conn = self_.get_owned().await.unwrap(); //map_err(|_| AsyncError::Checkout)?;
         task::spawn_blocking(move || {
             let mut conn = conn.inner();
@@ -241,7 +237,7 @@ where
     where
         Self: ExecuteDsl<Conn>;
 
-    async fn load_async<'a, U>(self, asc: &AsyncConn) -> AsyncResult<Vec<U>>
+    async fn load_async<U>(self, asc: &AsyncConn) -> AsyncResult<Vec<U>>
     where
         U: Send + 'static,
         Self: LoadQuery<Conn, U>;
@@ -266,9 +262,9 @@ where
 #[async_trait]
 impl<T, AsyncConn, Conn> AsyncRunQueryDsl<Conn, AsyncConn> for T
 where
-    T: Send + RunQueryDsl<Conn> + 'static,
-    Conn: Connection + 'static,
-    AsyncConn: AsyncConnection<Conn> + Sync + 'static + Send,
+    T: 'static + Send + RunQueryDsl<Conn>,
+    Conn: 'static + Connection,
+    AsyncConn: Send + Sync + AsyncConnection<Conn>,
 {
     async fn execute_async(self, asc: &AsyncConn) -> AsyncResult<usize>
     where
@@ -277,7 +273,7 @@ where
         asc.run(|conn| self.execute(conn)).await
     }
 
-    async fn load_async<'a, U>(self, asc: &AsyncConn) -> AsyncResult<Vec<U>>
+    async fn load_async<U>(self, asc: &AsyncConn) -> AsyncResult<Vec<U>>
     where
         U: Send + 'static,
         Self: LoadQuery<Conn, U>,
@@ -310,3 +306,37 @@ where
         asc.run(|conn| self.first(conn)).await
     }
 }
+
+// TODO: Sort out lifetime weirdness here.
+// I'm bumping into issues where the compiler things "T" doesn't live
+// enough, even though we're trying to *move* T into the "run" closure.
+//
+// TODO: See corresponding usage in examples/usage.rs for an example.
+
+// #[async_trait]
+// pub trait AsyncSaveChangesDsl<Conn, AsyncConn>
+// where
+//     Conn: 'static + Connection,
+// {
+//     async fn save_changes_async<U>(self, asc: &AsyncConn) -> AsyncResult<U>
+//     where
+//         Self: Sized + Send + Sync,
+//         U: Send + 'static,
+//         Conn: UpdateAndFetchResults<Self, U>;
+// }
+//
+// #[async_trait]
+// impl<T, AsyncConn, Conn> AsyncSaveChangesDsl<Conn, AsyncConn> for T
+// where
+//     T: 'static + Send + Sync + SaveChangesDsl<Conn>,
+//     Conn: 'static + Connection,
+//     AsyncConn: Send + Sync + AsyncConnection<Conn>,
+// {
+//     async fn save_changes_async<U>(self: T, asc: &AsyncConn) -> AsyncResult<U>
+//     where
+//         U: Send + 'static,
+//         Conn: UpdateAndFetchResults<Self, U>,
+//     {
+//         asc.run(|conn| self.save_changes(conn)).await
+//     }
+// }
