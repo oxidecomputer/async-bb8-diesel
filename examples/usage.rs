@@ -1,7 +1,5 @@
-use async_bb8_diesel::AsyncConnection;
-use async_bb8_diesel::AsyncRunQueryDsl;
-use diesel::pg::PgConnection;
-use diesel::prelude::*;
+use async_bb8_diesel::{AsyncConnection, AsyncRunQueryDsl, AsyncSaveChangesDsl};
+use diesel::{pg::PgConnection, prelude::*};
 
 table! {
     users (id) {
@@ -10,11 +8,25 @@ table! {
     }
 }
 
-#[derive(AsChangeset, Identifiable, Insertable, Queryable, PartialEq)]
+#[derive(AsChangeset, Insertable, Queryable, PartialEq, Clone)]
 #[table_name = "users"]
 pub struct User {
     pub id: i32,
     pub name: String,
+}
+
+use diesel::associations::{HasTable, Identifiable};
+impl HasTable for User {
+    type Table = users::table;
+    fn table() -> Self::Table {
+        users::table
+    }
+}
+impl Identifiable for User {
+    type Id = i32;
+    fn id(self) -> Self::Id {
+        self.id
+    }
 }
 
 #[tokio::main]
@@ -53,16 +65,11 @@ async fn main() {
         .unwrap();
 
     // Update via save_changes
-    //
-    // TODO: See note on AsyncSaveChangesDsl.
-    //    let user = User {
-    //        id: 0,
-    //        name: "Jim".to_string(),
-    //    };
-    //    let _ = user
-    //        .save_changes_async::<User>(&pool)
-    //        .await
-    //        .unwrap();
+    let user = User {
+        id: 0,
+        name: "Jim".to_string(),
+    };
+    let _ = user.save_changes_async::<User>(&pool).await.unwrap();
 
     // Delete
     let _ = diesel::delete(dsl::users)

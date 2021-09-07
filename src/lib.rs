@@ -129,7 +129,7 @@ impl<C> DieselConnection<C> {
     //
     // As this is a blocking mutext, it's recommended to avoid invoking
     // this function from an asynchronous context.
-    pub fn inner(&self) -> std::sync::MutexGuard<'_, C> {
+    fn inner(&self) -> std::sync::MutexGuard<'_, C> {
         self.0.lock().unwrap()
     }
 }
