@@ -7,14 +7,17 @@
 
 use async_trait::async_trait;
 use diesel::{
+    associations::{HasTable, Identifiable},
     connection::{Connection, SimpleConnection},
-    dsl::Limit,
+    dsl::{Limit, Update},
+    expression::{is_aggregate, MixedAggregates, ValidGrouping},
+    query_builder::{AsChangeset, IntoUpdateTarget},
     query_dsl::{
         methods::{ExecuteDsl, LimitDsl, LoadQuery},
         RunQueryDsl,
     },
     r2d2::{self, ManageConnection, R2D2Connection},
-    QueryResult,
+    QueryResult, Table,
 };
 use std::sync::{Arc, Mutex};
 use tokio::task;
@@ -84,7 +87,7 @@ where
     async fn connect(&self) -> Result<Self::Connection, Self::Error> {
         self.run_blocking(|m| m.connect())
             .await
-            .map(|c| DieselConnection::new(c))
+            .map(DieselConnection::new)
     }
 
     async fn is_valid(
@@ -126,7 +129,7 @@ impl<C> DieselConnection<C> {
     //
     // As this is a blocking mutext, it's recommended to avoid invoking
     // this function from an asynchronous context.
-    fn inner(&self) -> std::sync::MutexGuard<'_, C> {
+    pub fn inner(&self) -> std::sync::MutexGuard<'_, C> {
         self.0.lock().unwrap()
     }
 }
@@ -307,36 +310,53 @@ where
     }
 }
 
-// TODO: Sort out lifetime weirdness here.
-// I'm bumping into issues where the compiler things "T" doesn't live
-// enough, even though we're trying to *move* T into the "run" closure.
-//
-// TODO: See corresponding usage in examples/usage.rs for an example.
+// Copied from the `diesel::query_dsl::UpdateAndFetchResults` implementation
+#[async_trait]
+pub trait AsyncSaveChangesDsl<Conn, AsyncConn>
+where
+    Conn: 'static + Connection,
+{
+    async fn save_changes_async<Output>(self, asc: &AsyncConn) -> AsyncResult<Output>
+    where
+        Self: Clone
+            + Sized
+            + Send
+            + Sync
+            + HasTable
+            + Identifiable
+            + AsChangeset<Target = <Self as HasTable>::Table>
+            + IntoUpdateTarget,
+        Update<Self, Self>: LoadQuery<Conn, Output>,
+        <<Self as HasTable>::Table as Table>::AllColumns: ValidGrouping<()>,
+        <<<Self as HasTable>::Table as Table>::AllColumns as ValidGrouping<()>>::IsAggregate:
+            MixedAggregates<is_aggregate::No, Output = is_aggregate::No>,
+        Output: Send + 'static;
+}
 
-// #[async_trait]
-// pub trait AsyncSaveChangesDsl<Conn, AsyncConn>
-// where
-//     Conn: 'static + Connection,
-// {
-//     async fn save_changes_async<U>(self, asc: &AsyncConn) -> AsyncResult<U>
-//     where
-//         Self: Sized + Send + Sync,
-//         U: Send + 'static,
-//         Conn: UpdateAndFetchResults<Self, U>;
-// }
-//
-// #[async_trait]
-// impl<T, AsyncConn, Conn> AsyncSaveChangesDsl<Conn, AsyncConn> for T
-// where
-//     T: 'static + Send + Sync + SaveChangesDsl<Conn>,
-//     Conn: 'static + Connection,
-//     AsyncConn: Send + Sync + AsyncConnection<Conn>,
-// {
-//     async fn save_changes_async<U>(self: T, asc: &AsyncConn) -> AsyncResult<U>
-//     where
-//         U: Send + 'static,
-//         Conn: UpdateAndFetchResults<Self, U>,
-//     {
-//         asc.run(|conn| self.save_changes(conn)).await
-//     }
-// }
+#[async_trait]
+impl<T, AsyncConn, Conn> AsyncSaveChangesDsl<Conn, AsyncConn> for T
+where
+    T: 'static + Send + Sync,
+    Conn: 'static + Connection,
+    AsyncConn: Send + Sync + AsyncConnection<Conn>,
+{
+    async fn save_changes_async<Output>(self: T, asc: &AsyncConn) -> AsyncResult<Output>
+    where
+        Self: Clone
+            + Sized
+            + Send
+            + Sync
+            + HasTable
+            + Identifiable
+            + AsChangeset<Target = <Self as HasTable>::Table>
+            + IntoUpdateTarget,
+        Update<Self, Self>: LoadQuery<Conn, Output>,
+        <<Self as HasTable>::Table as Table>::AllColumns: ValidGrouping<()>,
+        <<<Self as HasTable>::Table as Table>::AllColumns as ValidGrouping<()>>::IsAggregate:
+            MixedAggregates<is_aggregate::No, Output = is_aggregate::No>,
+        Output: Send + 'static,
+    {
+        asc.run(|conn| diesel::update(self.clone()).set(self).get_result(conn))
+            .await
+    }
+}
