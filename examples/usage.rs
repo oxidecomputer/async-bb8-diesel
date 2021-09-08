@@ -15,7 +15,7 @@ pub struct User {
     pub name: String,
 }
 
-#[derive(AsChangeset, Identifiable, Clone, Copy)]
+#[derive(AsChangeset, Identifiable)]
 #[table_name = "users"]
 pub struct UserUpdate<'a> {
     pub id: i32,
