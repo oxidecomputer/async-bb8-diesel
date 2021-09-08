@@ -7,17 +7,14 @@
 
 use async_trait::async_trait;
 use diesel::{
-    associations::{HasTable, Identifiable},
     connection::{Connection, SimpleConnection},
-    dsl::{Limit, Update},
-    expression::{is_aggregate, MixedAggregates, ValidGrouping},
-    query_builder::{AsChangeset, IntoUpdateTarget},
+    dsl::Limit,
     query_dsl::{
         methods::{ExecuteDsl, LimitDsl, LoadQuery},
         RunQueryDsl,
     },
     r2d2::{self, ManageConnection, R2D2Connection},
-    QueryResult, Table,
+    QueryResult,
 };
 use std::sync::{Arc, Mutex};
 use tokio::task;
@@ -310,7 +307,6 @@ where
     }
 }
 
-// Copied from the `diesel::query_dsl::UpdateAndFetchResults` implementation
 #[async_trait]
 pub trait AsyncSaveChangesDsl<Conn, AsyncConn>
 where
@@ -318,45 +314,23 @@ where
 {
     async fn save_changes_async<Output>(self, asc: &AsyncConn) -> AsyncResult<Output>
     where
-        Self: Clone
-            + Sized
-            + Send
-            + Sync
-            + HasTable
-            + Identifiable
-            + AsChangeset<Target = <Self as HasTable>::Table>
-            + IntoUpdateTarget,
-        Update<Self, Self>: LoadQuery<Conn, Output>,
-        <<Self as HasTable>::Table as Table>::AllColumns: ValidGrouping<()>,
-        <<<Self as HasTable>::Table as Table>::AllColumns as ValidGrouping<()>>::IsAggregate:
-            MixedAggregates<is_aggregate::No, Output = is_aggregate::No>,
+        Self: Sized,
+        Conn: diesel::query_dsl::UpdateAndFetchResults<Self, Output>,
         Output: Send + 'static;
 }
 
 #[async_trait]
 impl<T, AsyncConn, Conn> AsyncSaveChangesDsl<Conn, AsyncConn> for T
 where
-    T: 'static + Send + Sync,
+    T: 'static + Send + Sync + diesel::SaveChangesDsl<Conn>,
     Conn: 'static + Connection,
     AsyncConn: Send + Sync + AsyncConnection<Conn>,
 {
-    async fn save_changes_async<Output>(self: T, asc: &AsyncConn) -> AsyncResult<Output>
+    async fn save_changes_async<Output>(self, asc: &AsyncConn) -> AsyncResult<Output>
     where
-        Self: Clone
-            + Sized
-            + Send
-            + Sync
-            + HasTable
-            + Identifiable
-            + AsChangeset<Target = <Self as HasTable>::Table>
-            + IntoUpdateTarget,
-        Update<Self, Self>: LoadQuery<Conn, Output>,
-        <<Self as HasTable>::Table as Table>::AllColumns: ValidGrouping<()>,
-        <<<Self as HasTable>::Table as Table>::AllColumns as ValidGrouping<()>>::IsAggregate:
-            MixedAggregates<is_aggregate::No, Output = is_aggregate::No>,
+        Conn: diesel::query_dsl::UpdateAndFetchResults<Self, Output>,
         Output: Send + 'static,
     {
-        asc.run(|conn| diesel::update(self.clone()).set(self).get_result(conn))
-            .await
+        asc.run(|conn| self.save_changes(conn)).await
     }
 }

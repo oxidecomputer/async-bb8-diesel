@@ -15,18 +15,11 @@ pub struct User {
     pub name: String,
 }
 
-use diesel::associations::{HasTable, Identifiable};
-impl HasTable for User {
-    type Table = users::table;
-    fn table() -> Self::Table {
-        users::table
-    }
-}
-impl Identifiable for User {
-    type Id = i32;
-    fn id(self) -> Self::Id {
-        self.id
-    }
+#[derive(AsChangeset, Identifiable, Clone, Copy)]
+#[table_name = "users"]
+pub struct UserUpdate<'a> {
+    pub id: i32,
+    pub name: &'a str,
 }
 
 #[tokio::main]
@@ -65,11 +58,11 @@ async fn main() {
         .unwrap();
 
     // Update via save_changes
-    let user = User {
+    let update = &UserUpdate {
         id: 0,
-        name: "Jim".to_string(),
+        name: "Jim",
     };
-    let _ = user.save_changes_async::<User>(&pool).await.unwrap();
+    let _ = update.save_changes_async::<User>(&pool).await.unwrap();
 
     // Delete
     let _ = diesel::delete(dsl::users)
