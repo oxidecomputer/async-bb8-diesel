@@ -84,7 +84,7 @@ where
     async fn connect(&self) -> Result<Self::Connection, Self::Error> {
         self.run_blocking(|m| m.connect())
             .await
-            .map(|c| DieselConnection::new(c))
+            .map(DieselConnection::new)
     }
 
     async fn is_valid(
@@ -307,36 +307,30 @@ where
     }
 }
 
-// TODO: Sort out lifetime weirdness here.
-// I'm bumping into issues where the compiler things "T" doesn't live
-// enough, even though we're trying to *move* T into the "run" closure.
-//
-// TODO: See corresponding usage in examples/usage.rs for an example.
+#[async_trait]
+pub trait AsyncSaveChangesDsl<Conn, AsyncConn>
+where
+    Conn: 'static + Connection,
+{
+    async fn save_changes_async<Output>(self, asc: &AsyncConn) -> AsyncResult<Output>
+    where
+        Self: Sized,
+        Conn: diesel::query_dsl::UpdateAndFetchResults<Self, Output>,
+        Output: Send + 'static;
+}
 
-// #[async_trait]
-// pub trait AsyncSaveChangesDsl<Conn, AsyncConn>
-// where
-//     Conn: 'static + Connection,
-// {
-//     async fn save_changes_async<U>(self, asc: &AsyncConn) -> AsyncResult<U>
-//     where
-//         Self: Sized + Send + Sync,
-//         U: Send + 'static,
-//         Conn: UpdateAndFetchResults<Self, U>;
-// }
-//
-// #[async_trait]
-// impl<T, AsyncConn, Conn> AsyncSaveChangesDsl<Conn, AsyncConn> for T
-// where
-//     T: 'static + Send + Sync + SaveChangesDsl<Conn>,
-//     Conn: 'static + Connection,
-//     AsyncConn: Send + Sync + AsyncConnection<Conn>,
-// {
-//     async fn save_changes_async<U>(self: T, asc: &AsyncConn) -> AsyncResult<U>
-//     where
-//         U: Send + 'static,
-//         Conn: UpdateAndFetchResults<Self, U>,
-//     {
-//         asc.run(|conn| self.save_changes(conn)).await
-//     }
-// }
+#[async_trait]
+impl<T, AsyncConn, Conn> AsyncSaveChangesDsl<Conn, AsyncConn> for T
+where
+    T: 'static + Send + Sync + diesel::SaveChangesDsl<Conn>,
+    Conn: 'static + Connection,
+    AsyncConn: Send + Sync + AsyncConnection<Conn>,
+{
+    async fn save_changes_async<Output>(self, asc: &AsyncConn) -> AsyncResult<Output>
+    where
+        Conn: diesel::query_dsl::UpdateAndFetchResults<Self, Output>,
+        Output: Send + 'static,
+    {
+        asc.run(|conn| self.save_changes(conn)).await
+    }
+}

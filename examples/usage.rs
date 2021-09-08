@@ -1,7 +1,5 @@
-use async_bb8_diesel::AsyncConnection;
-use async_bb8_diesel::AsyncRunQueryDsl;
-use diesel::pg::PgConnection;
-use diesel::prelude::*;
+use async_bb8_diesel::{AsyncConnection, AsyncRunQueryDsl, AsyncSaveChangesDsl};
+use diesel::{pg::PgConnection, prelude::*};
 
 table! {
     users (id) {
@@ -10,11 +8,18 @@ table! {
     }
 }
 
-#[derive(AsChangeset, Identifiable, Insertable, Queryable, PartialEq)]
+#[derive(AsChangeset, Insertable, Queryable, PartialEq, Clone)]
 #[table_name = "users"]
 pub struct User {
     pub id: i32,
     pub name: String,
+}
+
+#[derive(AsChangeset, Identifiable)]
+#[table_name = "users"]
+pub struct UserUpdate<'a> {
+    pub id: i32,
+    pub name: &'a str,
 }
 
 #[tokio::main]
@@ -53,16 +58,11 @@ async fn main() {
         .unwrap();
 
     // Update via save_changes
-    //
-    // TODO: See note on AsyncSaveChangesDsl.
-    //    let user = User {
-    //        id: 0,
-    //        name: "Jim".to_string(),
-    //    };
-    //    let _ = user
-    //        .save_changes_async::<User>(&pool)
-    //        .await
-    //        .unwrap();
+    let update = &UserUpdate {
+        id: 0,
+        name: "Jim",
+    };
+    let _ = update.save_changes_async::<User>(&pool).await.unwrap();
 
     // Delete
     let _ = diesel::delete(dsl::users)
