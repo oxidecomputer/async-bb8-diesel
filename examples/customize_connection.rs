@@ -1,6 +1,6 @@
 //! An example showing how to cutomize connections while using pooling.
 
-use async_bb8_diesel::{AsyncError, AsyncRunQueryDsl, AsyncSimpleConnection, DieselConnection, ManageError};
+use async_bb8_diesel::{AsyncError, AsyncRunQueryDsl, AsyncSimpleConnection, DieselConnection, ConnectionError};
 use async_trait::async_trait;
 use diesel::{pg::PgConnection, prelude::*};
 
@@ -24,13 +24,23 @@ struct ConnectionCustomizer {}
 type DieselPgConn = DieselConnection<PgConnection>;
 
 #[async_trait]
-impl bb8::CustomizeConnection<DieselPgConn, ManageError> for ConnectionCustomizer {
-    async fn on_acquire(&self, connection: &mut DieselPgConn) -> Result<(), ManageError> {
+impl bb8::CustomizeConnection<DieselPgConn, ConnectionError> for ConnectionCustomizer {
+    async fn on_acquire(&self, connection: &mut DieselPgConn) -> Result<(), ConnectionError> {
+
+        // TODO TODO TODO:
+        //
+        // This trait *must* return DieselConnectionManager<T>::Error.
+        // - This is currently "ConnectionError".
+        //
+        // However, batch_execute_async wants to return 'AsyncResult'.
+        // - Is this right?
+        // - Kinda seems like we might want to return different errors
+        // from a connection vs the pool...
         connection
-            .batch_execute_async("hi")
+            .batch_execute_async("please execute some raw sql for me")
             .await
-            .unwrap(); // TODO: FIX ME!
-        Ok(())
+//            .unwrap(); // TODO: FIX ME!
+//        Ok(())
     }
 }
 
@@ -49,18 +59,7 @@ async fn main() {
     // Insert.
     let _ = diesel::insert_into(dsl::users)
         .values((dsl::id.eq(0), dsl::name.eq("Jim")))
-        .execute_async(&pool)
-        .await
-        .unwrap();
-
-    // Load
-    let _ = dsl::users.get_result_async::<User>(&pool).await.unwrap();
-
-    // Update
-    let _ = diesel::update(dsl::users)
-        .filter(dsl::id.eq(0))
-        .set(dsl::name.eq("Jim, But Different"))
-        .execute_async(&pool)
+        .execute_async(&*pool.get().await.unwrap())
         .await
         .unwrap();
 }

@@ -80,13 +80,13 @@ where
     T: R2D2Connection + Send + 'static,
 {
     type Connection = DieselConnection<T>;
-    type Error = ManageError;
+    type Error = ConnectionError;
 
     async fn connect(&self) -> Result<Self::Connection, Self::Error> {
         self.run_blocking(|m| m.connect())
             .await
             .map(DieselConnection::new)
-            .map_err(|e| ManageError::R2d2(e))
+            .map_err(|e| ConnectionError::R2d2(e))
     }
 
     async fn is_valid(
@@ -136,10 +136,15 @@ impl<C> DieselConnection<C> {
 /// Syntactic sugar around a Result returning an [`AsyncError`].
 pub type AsyncResult<R> = Result<R, AsyncError>;
 
+/// Errors returned directly from DieselConnection.
 #[derive(Error, Debug)]
-pub enum ManageError {
-    #[error("?")]
-    R2d2(#[from] diesel::r2d2::Error)
+pub enum ConnectionError {
+    #[error("Failed to access the underlying synchronous connection pool")]
+    R2d2(#[from] diesel::r2d2::Error),
+
+    /// Query failure.
+    #[error("Failed to issue a query")]
+    Query(#[from] diesel::result::Error),
 }
 
 /// Describes an error from sending a request to Diesel.
@@ -147,14 +152,12 @@ pub enum ManageError {
 pub enum AsyncError {
     /// Failed to checkout a connection.
     #[error("Failed to checkout a connection")]
-    Checkout(#[from] bb8::RunError<ManageError>),
+    Checkout(#[from] bb8::RunError<ConnectionError>),
 
     /// Query failure.
     #[error("Failed to issue a query")]
     Query(#[from] diesel::result::Error),
 }
-
-// pub type AsyncError = diesel::result::Error;
 
 /// An async variant of [`diesel::connection::SimpleConnection`].
 #[async_trait]
@@ -184,10 +187,11 @@ where
         task::spawn_blocking(move || conn.inner().batch_execute(&query))
             .await
             .unwrap() // Propagate panics
-            .map_err(|e| e.into())
+            .map_err(|e| AsyncError::Query(e))
     }
 }
 
+// Additionally, we allow callers to act upon manually checked out connections.
 #[async_trait]
 impl<Conn> AsyncSimpleConnection<Conn> for DieselConnection<Conn>
 where
@@ -200,7 +204,7 @@ where
         task::spawn_blocking(move || diesel_conn.inner().batch_execute(&query))
             .await
             .unwrap() // Propagate panics
-            .map_err(|e| e.into())
+            .map_err(|e| AsyncError::Query(e))
     }
 }
 
@@ -254,6 +258,41 @@ where
             .map_err(|e| AsyncError::Checkout(e))?;
         task::spawn_blocking(move || {
             let mut conn = conn.inner();
+            conn.transaction(|c| f(c))
+        })
+        .await
+        .unwrap() // Propagate panics
+        .map_err(|e| e.into())
+    }
+}
+
+#[async_trait]
+impl<Conn> AsyncConnection<Conn> for DieselConnection<Conn>
+where
+    Conn: 'static + R2D2Connection,
+{
+    #[inline]
+    async fn run<R, Func>(&self, f: Func) -> AsyncResult<R>
+    where
+        R: Send + 'static,
+        Func: FnOnce(&mut Conn) -> QueryResult<R> + Send + 'static,
+    {
+        let diesel_conn = DieselConnection(self.0.clone());
+        task::spawn_blocking(move || f(&mut *diesel_conn.inner()))
+            .await
+            .unwrap() // Propagate panics
+            .map_err(|e| e.into())
+    }
+
+    #[inline]
+    async fn transaction<R, Func>(&self, f: Func) -> AsyncResult<R>
+    where
+        R: Send + 'static,
+        Func: FnOnce(&mut Conn) -> QueryResult<R> + Send + 'static,
+    {
+        let diesel_conn = DieselConnection(self.0.clone());
+        task::spawn_blocking(move || {
+            let mut conn = diesel_conn.inner();
             conn.transaction(|c| f(c))
         })
         .await
