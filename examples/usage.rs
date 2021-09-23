@@ -58,10 +58,7 @@ async fn main() {
         .unwrap();
 
     // Update via save_changes
-    let update = &UserUpdate {
-        id: 0,
-        name: "Jim",
-    };
+    let update = &UserUpdate { id: 0, name: "Jim" };
     let _ = update.save_changes_async::<User>(&pool).await.unwrap();
 
     // Delete
