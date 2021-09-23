@@ -86,7 +86,7 @@ where
         self.run_blocking(|m| m.connect())
             .await
             .map(DieselConnection::new)
-            .map_err(|e| ConnectionError::R2d2(e))
+            .map_err(|e| ConnectionError::Checkout(e))
     }
 
     async fn is_valid(
@@ -133,30 +133,42 @@ impl<C> DieselConnection<C> {
     }
 }
 
-/// Syntactic sugar around a Result returning an [`AsyncError`].
-pub type AsyncResult<R> = Result<R, AsyncError>;
+/// Syntactic sugar around a Result returning an [`PoolError`].
+pub type AsyncResult<R> = Result<R, PoolError>;
 
 /// Errors returned directly from DieselConnection.
 #[derive(Error, Debug)]
 pub enum ConnectionError {
-    #[error("Failed to access the underlying synchronous connection pool")]
-    R2d2(#[from] diesel::r2d2::Error),
+    #[error("Failed to checkout a connection")]
+    Checkout(#[from] diesel::r2d2::Error),
 
-    /// Query failure.
     #[error("Failed to issue a query")]
     Query(#[from] diesel::result::Error),
 }
 
-/// Describes an error from sending a request to Diesel.
+/// Describes an error performing an operation from a connection pool.
 #[derive(Error, Debug)]
-pub enum AsyncError {
-    /// Failed to checkout a connection.
+pub enum PoolError {
     #[error("Failed to checkout a connection")]
-    Checkout(#[from] bb8::RunError<ConnectionError>),
+    Connection(#[from] ConnectionError),
 
-    /// Query failure.
-    #[error("Failed to issue a query")]
-    Query(#[from] diesel::result::Error),
+    #[error("BB8 Timeout accessing connection")]
+    Timeout,
+}
+
+impl From<diesel::result::Error> for PoolError {
+    fn from(error: diesel::result::Error) -> Self {
+        PoolError::Connection(ConnectionError::Query(error))
+    }
+}
+
+impl From<bb8::RunError<ConnectionError>> for PoolError {
+    fn from(error: bb8::RunError<ConnectionError>) -> Self {
+        match error {
+            bb8::RunError::User(e) => PoolError::Connection(e),
+            bb8::RunError::TimedOut => PoolError::Timeout,
+        }
+    }
 }
 
 /// An async variant of [`diesel::connection::SimpleConnection`].
@@ -183,11 +195,11 @@ where
         let query = query.to_string();
         let conn = self_.get_owned()
             .await
-            .map_err(|e| AsyncError::Checkout(e))?;
+            .map_err(|e| PoolError::from(e))?;
         task::spawn_blocking(move || conn.inner().batch_execute(&query))
             .await
             .unwrap() // Propagate panics
-            .map_err(|e| AsyncError::Query(e))
+            .map_err(|e| PoolError::from(e))
     }
 }
 
@@ -204,7 +216,7 @@ where
         task::spawn_blocking(move || diesel_conn.inner().batch_execute(&query))
             .await
             .unwrap() // Propagate panics
-            .map_err(|e| AsyncError::Query(e))
+            .map_err(|e| PoolError::from(e))
     }
 }
 
@@ -239,7 +251,7 @@ where
         let self_ = self.clone();
         let conn = self_.get_owned()
             .await
-            .map_err(|e| AsyncError::Checkout(e))?;
+            .map_err(|e| PoolError::from(e))?;
         task::spawn_blocking(move || f(&mut *conn.inner()))
             .await
             .unwrap() // Propagate panics
@@ -255,7 +267,7 @@ where
         let self_ = self.clone();
         let conn = self_.get_owned()
             .await
-            .map_err(|e| AsyncError::Checkout(e))?;
+            .map_err(|e| PoolError::from(e))?;
         task::spawn_blocking(move || {
             let mut conn = conn.inner();
             conn.transaction(|c| f(c))

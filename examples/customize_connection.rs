@@ -1,6 +1,6 @@
 //! An example showing how to cutomize connections while using pooling.
 
-use async_bb8_diesel::{AsyncError, AsyncRunQueryDsl, AsyncSimpleConnection, DieselConnection, ConnectionError};
+use async_bb8_diesel::{PoolError, AsyncRunQueryDsl, AsyncSimpleConnection, DieselConnection, ConnectionError};
 use async_trait::async_trait;
 use diesel::{pg::PgConnection, prelude::*};
 
