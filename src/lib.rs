@@ -42,6 +42,14 @@ use tokio::task;
 ///     let mgr = async_bb8_diesel::DieselConnectionManager::<PgConnection>::new("localhost:1234");
 ///     let pool = bb8::Pool::builder().build(mgr).await.unwrap();
 ///
+///     // You can acquire connections to the pool manually...
+///     diesel::insert_into(dsl::users)
+///         .values(dsl::id.eq(1337))
+///         .execute_async(&*pool.get().await.unwrap())
+///         .await
+///         .unwrap();
+///
+///     // ... Or just issue them to the pool directly.
 ///     diesel::insert_into(dsl::users)
 ///         .values(dsl::id.eq(1337))
 ///         .execute_async(&pool)
@@ -139,10 +147,10 @@ pub type ConnectionResult<R> = Result<R, ConnectionError>;
 /// Errors returned directly from DieselConnection.
 #[derive(Error, Debug)]
 pub enum ConnectionError {
-    #[error("Failed to checkout a connection")]
+    #[error("Failed to checkout a connection: {0}")]
     Checkout(#[from] diesel::r2d2::Error),
 
-    #[error("Failed to issue a query")]
+    #[error("Failed to issue a query: {0}")]
     Query(#[from] diesel::result::Error),
 }
 
@@ -150,9 +158,12 @@ pub enum ConnectionError {
 pub type PoolResult<R> = Result<R, PoolError>;
 
 /// Describes an error performing an operation from a connection pool.
+///
+/// This is a superset of [`ConnectionError`] which also may
+/// propagate errors attempting to access the connection pool.
 #[derive(Error, Debug)]
 pub enum PoolError {
-    #[error("Failed to checkout a connection")]
+    #[error("Failed to checkout a connection: {0}")]
     Connection(#[from] ConnectionError),
 
     #[error("BB8 Timeout accessing connection")]
