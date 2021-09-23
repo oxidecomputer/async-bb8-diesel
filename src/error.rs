@@ -10,7 +10,7 @@ use thiserror::Error;
 /// Syntactic sugar around a Result returning an [`ConnectionError`].
 pub type ConnectionResult<R> = Result<R, ConnectionError>;
 
-/// Errors returned directly from DieselConnection.
+/// Errors returned directly from Connection.
 #[derive(Error, Debug)]
 pub enum ConnectionError {
     #[error("Failed to checkout a connection: {0}")]

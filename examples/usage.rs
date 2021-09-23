@@ -26,7 +26,7 @@ pub struct UserUpdate<'a> {
 async fn main() {
     use users::dsl;
 
-    let manager = async_bb8_diesel::DieselConnectionManager::<PgConnection>::new("localhost:1234");
+    let manager = async_bb8_diesel::ConnectionManager::<PgConnection>::new("localhost:1234");
     let pool = bb8::Pool::builder().build(manager).await.unwrap();
 
     // Insert by values

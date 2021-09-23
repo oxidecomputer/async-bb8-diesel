@@ -1,9 +1,13 @@
 //! An async-safe connection pool for Diesel.
 
-use crate::{ConnectionError, DieselConnection};
+use crate::{Connection, ConnectionError, PoolError, PoolResult};
 use async_trait::async_trait;
-use diesel::r2d2::{self, ManageConnection, R2D2Connection};
+use diesel::{
+    r2d2::{self, ManageConnection, R2D2Connection},
+    QueryResult,
+};
 use std::sync::{Arc, Mutex};
+use tokio::task;
 
 /// A connection manager which implements [`bb8::ManageConnection`] to
 /// integrate with bb8.
@@ -24,7 +28,7 @@ use std::sync::{Arc, Mutex};
 ///     use users::dsl;
 ///
 ///     // Creates a Diesel-specific connection manager for bb8.
-///     let mgr = async_bb8_diesel::DieselConnectionManager::<PgConnection>::new("localhost:1234");
+///     let mgr = async_bb8_diesel::ConnectionManager::<PgConnection>::new("localhost:1234");
 ///     let pool = bb8::Pool::builder().build(mgr).await.unwrap();
 ///
 ///     // You can acquire connections to the pool manually...
@@ -43,11 +47,11 @@ use std::sync::{Arc, Mutex};
 /// }
 /// ```
 #[derive(Clone)]
-pub struct DieselConnectionManager<T> {
+pub struct ConnectionManager<T> {
     inner: Arc<Mutex<r2d2::ConnectionManager<T>>>,
 }
 
-impl<T: Send + 'static> DieselConnectionManager<T> {
+impl<T: Send + 'static> ConnectionManager<T> {
     pub fn new<S: Into<String>>(database_url: S) -> Self {
         Self {
             inner: Arc::new(Mutex::new(r2d2::ConnectionManager::new(database_url))),
@@ -68,17 +72,17 @@ impl<T: Send + 'static> DieselConnectionManager<T> {
 }
 
 #[async_trait]
-impl<T> bb8::ManageConnection for DieselConnectionManager<T>
+impl<T> bb8::ManageConnection for ConnectionManager<T>
 where
     T: R2D2Connection + Send + 'static,
 {
-    type Connection = DieselConnection<T>;
+    type Connection = Connection<T>;
     type Error = ConnectionError;
 
     async fn connect(&self) -> Result<Self::Connection, Self::Error> {
         self.run_blocking(|m| m.connect())
             .await
-            .map(DieselConnection::new)
+            .map(Connection::new)
             .map_err(ConnectionError::Checkout)
     }
 
@@ -86,7 +90,7 @@ where
         &self,
         conn: &mut bb8::PooledConnection<'_, Self>,
     ) -> Result<(), Self::Error> {
-        let c = DieselConnection(conn.0.clone());
+        let c = Connection(conn.0.clone());
         self.run_blocking(move |m| {
             m.is_valid(&mut *c.inner())?;
             Ok(())
@@ -99,5 +103,60 @@ where
         // inner method without blocking as this method is not async, but `bb8`
         // indicates that this method is not mandatory.
         false
+    }
+}
+
+#[async_trait]
+impl<Conn> crate::AsyncSimpleConnection<Conn, PoolError> for bb8::Pool<ConnectionManager<Conn>>
+where
+    Conn: 'static + R2D2Connection,
+{
+    #[inline]
+    async fn batch_execute_async(&self, query: &str) -> PoolResult<()> {
+        let self_ = self.clone();
+        let query = query.to_string();
+        let conn = self_.get_owned().await.map_err(PoolError::from)?;
+        task::spawn_blocking(move || conn.inner().batch_execute(&query))
+            .await
+            .unwrap() // Propagate panics
+            .map_err(PoolError::from)
+    }
+}
+
+#[async_trait]
+impl<Conn> crate::AsyncConnection<Conn, PoolError> for bb8::Pool<ConnectionManager<Conn>>
+where
+    Conn: 'static + R2D2Connection,
+    bb8::Pool<ConnectionManager<Conn>>: crate::AsyncSimpleConnection<Conn, PoolError>,
+{
+    #[inline]
+    async fn run<R, Func>(&self, f: Func) -> PoolResult<R>
+    where
+        R: Send + 'static,
+        Func: FnOnce(&mut Conn) -> QueryResult<R> + Send + 'static,
+    {
+        let self_ = self.clone();
+        let conn = self_.get_owned().await.map_err(PoolError::from)?;
+        task::spawn_blocking(move || f(&mut *conn.inner()))
+            .await
+            .unwrap() // Propagate panics
+            .map_err(PoolError::from)
+    }
+
+    #[inline]
+    async fn transaction<R, Func>(&self, f: Func) -> PoolResult<R>
+    where
+        R: Send + 'static,
+        Func: FnOnce(&mut Conn) -> QueryResult<R> + Send + 'static,
+    {
+        let self_ = self.clone();
+        let conn = self_.get_owned().await.map_err(PoolError::from)?;
+        task::spawn_blocking(move || {
+            let mut conn = conn.inner();
+            conn.transaction(|c| f(c))
+        })
+        .await
+        .unwrap() // Propagate panics
+        .map_err(PoolError::from)
     }
 }
