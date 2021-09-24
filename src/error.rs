@@ -29,7 +29,7 @@ pub type PoolResult<R> = Result<R, PoolError>;
 /// propagate errors attempting to access the connection pool.
 #[derive(Error, Debug)]
 pub enum PoolError {
-    #[error("Failed to checkout a connection: {0}")]
+    #[error("Failure accessing a connection: {0}")]
     Connection(#[from] ConnectionError),
 
     #[error("BB8 Timeout accessing connection")]
