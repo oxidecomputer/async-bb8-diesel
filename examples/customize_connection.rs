@@ -20,6 +20,7 @@ impl bb8::CustomizeConnection<DieselPgConn, ConnectionError> for ConnectionCusto
 
 #[tokio::main]
 async fn main() {
+    usdt::register_probes().unwrap();
     let manager = async_bb8_diesel::ConnectionManager::<PgConnection>::new("localhost:1234");
     let _ = bb8::Pool::builder()
         .connection_customizer(Box::new(ConnectionCustomizer {}))

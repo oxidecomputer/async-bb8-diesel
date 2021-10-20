@@ -26,6 +26,8 @@ pub struct UserUpdate<'a> {
 async fn main() {
     use users::dsl;
 
+    usdt::register_probes().unwrap();
+
     let manager = async_bb8_diesel::ConnectionManager::<PgConnection>::new("localhost:1234");
     let pool = bb8::Pool::builder().build(manager).await.unwrap();
 

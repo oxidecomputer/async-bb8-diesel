@@ -80,7 +80,11 @@ where
     type Error = ConnectionError;
 
     async fn connect(&self) -> Result<Self::Connection, Self::Error> {
-        self.run_blocking(|m| m.connect())
+        self.run_blocking(|m| {
+            let conn = m.connect();
+            async_bb8_diesel_new_connection!(|| ());
+            conn
+        })
             .await
             .map(Connection::new)
             .map_err(ConnectionError::Checkout)

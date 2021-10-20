@@ -86,3 +86,15 @@ constructed.
   when you can block those threads - you can use either of the
   tokio-diesel or bb8-diesel crates, depending on whether or not you
   want access to the asynchronous thread pool.
+
+## USDT probes
+
+This crate contains two DTrace USDT probes:
+
+- `new_connection` is fired whenever the connection manager creates a new
+database connection.
+- `query` is fired for every query to the database, with the raw SQL
+string as an argument
+
+These rely on a nightly toolchain, and so are behind the `usdt-probes`
+feature flag.

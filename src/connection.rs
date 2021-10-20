@@ -39,7 +39,10 @@ where
     async fn batch_execute_async(&self, query: &str) -> ConnectionResult<()> {
         let diesel_conn = Connection(self.0.clone());
         let query = query.to_string();
-        task::spawn_blocking(move || diesel_conn.inner().batch_execute(&query))
+        task::spawn_blocking(move || {
+                async_bb8_diesel_query!(|| query.as_str());
+                diesel_conn.inner().batch_execute(&query)
+            })
             .await
             .unwrap() // Propagate panics
             .map_err(ConnectionError::from)
