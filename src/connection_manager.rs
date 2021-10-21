@@ -142,21 +142,4 @@ where
             .unwrap() // Propagate panics
             .map_err(PoolError::from)
     }
-
-    #[inline]
-    async fn transaction<R, Func>(&self, f: Func) -> PoolResult<R>
-    where
-        R: Send + 'static,
-        Func: FnOnce(&mut Conn) -> QueryResult<R> + Send + 'static,
-    {
-        let self_ = self.clone();
-        let conn = self_.get_owned().await.map_err(PoolError::from)?;
-        task::spawn_blocking(move || {
-            let mut conn = conn.inner();
-            conn.transaction(|c| f(c))
-        })
-        .await
-        .unwrap() // Propagate panics
-        .map_err(PoolError::from)
-    }
 }
