@@ -64,20 +64,4 @@ where
             .unwrap() // Propagate panics
             .map_err(ConnectionError::from)
     }
-
-    #[inline]
-    async fn transaction<R, Func>(&self, f: Func) -> ConnectionResult<R>
-    where
-        R: Send + 'static,
-        Func: FnOnce(&mut Conn) -> QueryResult<R> + Send + 'static,
-    {
-        let diesel_conn = Connection(self.0.clone());
-        task::spawn_blocking(move || {
-            let mut conn = diesel_conn.inner();
-            conn.transaction(|c| f(c))
-        })
-        .await
-        .unwrap() // Propagate panics
-        .map_err(ConnectionError::from)
-    }
 }

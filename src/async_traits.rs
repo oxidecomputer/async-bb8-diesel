@@ -34,7 +34,10 @@ where
     async fn transaction<R, Func>(&self, f: Func) -> Result<R, E>
     where
         R: Send + 'static,
-        Func: FnOnce(&mut Conn) -> QueryResult<R> + Send + 'static;
+        Func: FnOnce(&mut Conn) -> QueryResult<R> + Send + 'static,
+    {
+        self.run(|conn| conn.transaction(|c| f(c))).await
+    }
 }
 
 /// An async variant of [`diesel::query_dsl::RunQueryDsl`].
