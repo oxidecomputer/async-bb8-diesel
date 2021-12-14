@@ -130,7 +130,7 @@ where
     bb8::Pool<ConnectionManager<Conn>>: crate::AsyncSimpleConnection<Conn, PoolError>,
 {
     #[inline]
-    async fn run<R, Func>(&self, f: Func) -> PoolResult<R>
+    async fn run<R, Func>(&self, f: Func) -> Result<R, PoolError>
     where
         R: Send + 'static,
         Func: FnOnce(&mut Conn) -> Result<R, DieselError> + Send + 'static,

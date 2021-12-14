@@ -54,7 +54,7 @@ where
     Connection<Conn>: crate::AsyncSimpleConnection<Conn, ConnectionError>,
 {
     #[inline]
-    async fn run<R, Func>(&self, f: Func) -> ConnectionResult<R>
+    async fn run<R, Func>(&self, f: Func) -> Result<R, ConnectionError>
     where
         R: Send + 'static,
         Func: FnOnce(&mut Conn) -> Result<R, DieselError> + Send + 'static,
