@@ -13,25 +13,25 @@ use diesel::{
 
 /// An async variant of [`diesel::connection::SimpleConnection`].
 #[async_trait]
-pub trait AsyncSimpleConnection<Conn, E>
+pub trait AsyncSimpleConnection<Conn, ConnErr>
 where
     Conn: 'static + SimpleConnection,
 {
-    async fn batch_execute_async(&self, query: &str) -> Result<(), E>;
+    async fn batch_execute_async(&self, query: &str) -> Result<(), ConnErr>;
 }
 
 /// An async variant of [`diesel::connection::Connection`].
 #[async_trait]
-pub trait AsyncConnection<Conn, E>: AsyncSimpleConnection<Conn, E>
+pub trait AsyncConnection<Conn, ConnErr>: AsyncSimpleConnection<Conn, ConnErr>
 where
     Conn: 'static + DieselConnection,
 {
-    async fn run<R, Func>(&self, f: Func) -> Result<R, E>
+    async fn run<R, Func>(&self, f: Func) -> Result<R, ConnErr>
     where
         R: Send + 'static,
         Func: FnOnce(&mut Conn) -> Result<R, DieselError> + Send + 'static;
 
-    async fn transaction<R, Func>(&self, f: Func) -> Result<R, E>
+    async fn transaction<R, Func>(&self, f: Func) -> Result<R, ConnErr>
     where
         R: Send + 'static,
         Func: FnOnce(&mut Conn) -> Result<R, DieselError> + Send + 'static,
