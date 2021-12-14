@@ -2,7 +2,8 @@
 
 use crate::{ConnectionError, ConnectionResult};
 use async_trait::async_trait;
-use diesel::{r2d2::R2D2Connection, QueryResult};
+use diesel::r2d2::R2D2Connection;
+use diesel::result::Error as DieselError;
 use std::sync::{Arc, Mutex};
 use tokio::task;
 
@@ -56,7 +57,7 @@ where
     async fn run<R, Func>(&self, f: Func) -> ConnectionResult<R>
     where
         R: Send + 'static,
-        Func: FnOnce(&mut Conn) -> QueryResult<R> + Send + 'static,
+        Func: FnOnce(&mut Conn) -> Result<R, DieselError> + Send + 'static,
     {
         let diesel_conn = Connection(self.0.clone());
         task::spawn_blocking(move || f(&mut *diesel_conn.inner()))

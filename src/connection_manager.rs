@@ -4,7 +4,7 @@ use crate::{Connection, ConnectionError, PoolError, PoolResult};
 use async_trait::async_trait;
 use diesel::{
     r2d2::{self, ManageConnection, R2D2Connection},
-    QueryResult,
+    result::Error as DieselError,
 };
 use std::sync::{Arc, Mutex};
 use tokio::task;
@@ -133,7 +133,7 @@ where
     async fn run<R, Func>(&self, f: Func) -> PoolResult<R>
     where
         R: Send + 'static,
-        Func: FnOnce(&mut Conn) -> QueryResult<R> + Send + 'static,
+        Func: FnOnce(&mut Conn) -> Result<R, DieselError> + Send + 'static,
     {
         let self_ = self.clone();
         let conn = self_.get_owned().await.map_err(PoolError::from)?;

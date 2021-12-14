@@ -8,7 +8,7 @@ use diesel::{
         methods::{ExecuteDsl, LimitDsl, LoadQuery},
         RunQueryDsl,
     },
-    QueryResult,
+    result::Error as DieselError,
 };
 
 /// An async variant of [`diesel::connection::SimpleConnection`].
@@ -29,12 +29,12 @@ where
     async fn run<R, Func>(&self, f: Func) -> Result<R, E>
     where
         R: Send + 'static,
-        Func: FnOnce(&mut Conn) -> QueryResult<R> + Send + 'static;
+        Func: FnOnce(&mut Conn) -> Result<R, DieselError> + Send + 'static;
 
     async fn transaction<R, Func>(&self, f: Func) -> Result<R, E>
     where
         R: Send + 'static,
-        Func: FnOnce(&mut Conn) -> QueryResult<R> + Send + 'static,
+        Func: FnOnce(&mut Conn) -> Result<R, DieselError> + Send + 'static,
     {
         self.run(|conn| conn.transaction(|c| f(c))).await
     }
