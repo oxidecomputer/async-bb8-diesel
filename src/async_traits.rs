@@ -40,7 +40,6 @@ where
     async fn transaction<R, E, Func>(&self, f: Func) -> Result<R, E>
     where
         R: Send + 'static,
-        ConnErr: From<DieselError>,
         E: From<DieselError> + From<ConnErr> + Send + 'static,
         Func: FnOnce(&mut Conn) -> Result<R, E> + Send + 'static,
     {
