@@ -1,4 +1,4 @@
-use async_bb8_diesel::{AsyncConnection, AsyncRunQueryDsl, AsyncSaveChangesDsl};
+use async_bb8_diesel::{AsyncConnection, AsyncRunQueryDsl, AsyncSaveChangesDsl, ConnectionError, PoolError};
 use diesel::{pg::PgConnection, prelude::*};
 
 table! {
@@ -20,6 +20,21 @@ pub struct User {
 pub struct UserUpdate<'a> {
     pub id: i32,
     pub name: &'a str,
+}
+
+#[derive(thiserror::Error, Debug)]
+enum MyError {
+    #[error("DB error")]
+    Db(#[from] PoolError),
+
+    #[error("Custom transaction error")]
+    Other,
+}
+
+impl From<diesel::result::Error> for MyError {
+    fn from(error: diesel::result::Error) -> Self {
+        MyError::Db(PoolError::Connection(ConnectionError::Query(error)))
+    }
 }
 
 #[tokio::main]
@@ -78,8 +93,15 @@ async fn main() {
             .values((dsl::id.eq(1), dsl::name.eq("Another Jim")))
             .execute(conn)
             .unwrap();
-        Ok(())
+        Ok::<(), PoolError>(())
     })
     .await
     .unwrap();
+
+    // Transaction returning errors
+    pool.transaction(|_| {
+        return Err::<(), MyError>(MyError::Other {});
+    })
+    .await
+    .unwrap_err();
 }
