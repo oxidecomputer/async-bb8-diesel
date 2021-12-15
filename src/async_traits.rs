@@ -31,12 +31,6 @@ where
     /// Any error may be propagated through `f`, as long as that
     /// error type may be constructed from `ConnErr` (as that error
     /// type may also be generated).
-    //
-    // `run` is usually wrapping a SYNCHRONOUS FUNCTION `f` that
-    // returns a DieselError.
-    //
-    // Except sometimes it wraps the TRANSACTION FUNCTION that
-    // returns an arbitrary error `E`.
     async fn run<R, E, Func>(&self, f: Func) -> Result<R, E>
     where
         R: Send + 'static,
@@ -46,14 +40,11 @@ where
     async fn transaction<R, E, Func>(&self, f: Func) -> Result<R, E>
     where
         R: Send + 'static,
+        ConnErr: From<DieselError>,
         E: From<DieselError> + From<ConnErr> + Send + 'static,
         Func: FnOnce(&mut Conn) -> Result<R, E> + Send + 'static,
     {
-        self.run(|conn| {
-            conn.transaction(|c| {
-                f(c)
-            })
-        }).await
+        self.run(|conn| conn.transaction(|c| f(c))).await
     }
 }
 
@@ -125,7 +116,8 @@ where
         U: Send + 'static,
         Self: LoadQuery<Conn, U>,
     {
-        asc.run(|conn| self.get_results(conn).map_err(E::from)).await
+        asc.run(|conn| self.get_results(conn).map_err(E::from))
+            .await
     }
 
     async fn first_async<U>(self, asc: &AsyncConn) -> Result<U, E>
@@ -163,6 +155,7 @@ where
         Conn: diesel::query_dsl::UpdateAndFetchResults<Self, Output>,
         Output: Send + 'static,
     {
-        asc.run(|conn| self.save_changes(conn).map_err(E::from)).await
+        asc.run(|conn| self.save_changes(conn).map_err(E::from))
+            .await
     }
 }

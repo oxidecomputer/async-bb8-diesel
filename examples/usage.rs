@@ -1,4 +1,6 @@
-use async_bb8_diesel::{AsyncConnection, AsyncRunQueryDsl, AsyncSaveChangesDsl, ConnectionError, PoolError};
+use async_bb8_diesel::{
+    AsyncConnection, AsyncRunQueryDsl, AsyncSaveChangesDsl, ConnectionError, PoolError,
+};
 use diesel::{pg::PgConnection, prelude::*};
 
 table! {
@@ -22,6 +24,7 @@ pub struct UserUpdate<'a> {
     pub name: &'a str,
 }
 
+// Demonstrates an error which may be returned from transactions.
 #[derive(thiserror::Error, Debug)]
 enum MyError {
     #[error("DB error")]
@@ -98,10 +101,11 @@ async fn main() {
     .await
     .unwrap();
 
-    // Transaction returning errors
-    pool.transaction(|_| {
-        return Err::<(), MyError>(MyError::Other {});
-    })
-    .await
-    .unwrap_err();
+    // Transaction returning custom error types.
+    let _: MyError = pool
+        .transaction(|_| {
+            return Err::<(), MyError>(MyError::Other {});
+        })
+        .await
+        .unwrap_err();
 }

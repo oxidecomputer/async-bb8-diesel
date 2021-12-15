@@ -138,6 +138,5 @@ where
         task::spawn_blocking(move || f(&mut *conn.inner()))
             .await
             .unwrap() // Propagate panics
-//            .map_err(PoolError::from)
     }
 }

@@ -63,8 +63,5 @@ where
         task::spawn_blocking(move || f(&mut *diesel_conn.inner()))
             .await
             .unwrap() // Propagate panics
-//            .map_err(|e| {
-//                ConnectionError::from(e)
-//            })
     }
 }
