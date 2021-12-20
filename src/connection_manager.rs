@@ -2,10 +2,7 @@
 
 use crate::{Connection, ConnectionError, PoolError, PoolResult};
 use async_trait::async_trait;
-use diesel::{
-    r2d2::{self, ManageConnection, R2D2Connection},
-    QueryResult,
-};
+use diesel::r2d2::{self, ManageConnection, R2D2Connection};
 use std::sync::{Arc, Mutex};
 use tokio::task;
 
@@ -130,16 +127,16 @@ where
     bb8::Pool<ConnectionManager<Conn>>: crate::AsyncSimpleConnection<Conn, PoolError>,
 {
     #[inline]
-    async fn run<R, Func>(&self, f: Func) -> PoolResult<R>
+    async fn run<R, E, Func>(&self, f: Func) -> Result<R, E>
     where
         R: Send + 'static,
-        Func: FnOnce(&mut Conn) -> QueryResult<R> + Send + 'static,
+        E: From<PoolError> + Send + 'static,
+        Func: FnOnce(&mut Conn) -> Result<R, E> + Send + 'static,
     {
         let self_ = self.clone();
         let conn = self_.get_owned().await.map_err(PoolError::from)?;
         task::spawn_blocking(move || f(&mut *conn.inner()))
             .await
             .unwrap() // Propagate panics
-            .map_err(PoolError::from)
     }
 }
