@@ -57,26 +57,26 @@ where
     where
         Self: ExecuteDsl<Conn>;
 
-    async fn load_async<U>(self, asc: &AsyncConn) -> Result<Vec<U>, E>
+    async fn load_async<'a, U>(self, asc: &AsyncConn) -> Result<Vec<U>, E>
     where
         U: Send + 'static,
-        Self: LoadQuery<Conn, U>;
+        Self: LoadQuery<'a, Conn, U>;
 
-    async fn get_result_async<U>(self, asc: &AsyncConn) -> Result<U, E>
+    async fn get_result_async<'a, U>(self, asc: &AsyncConn) -> Result<U, E>
     where
         U: Send + 'static,
-        Self: LoadQuery<Conn, U>;
+        Self: LoadQuery<'a, Conn, U>;
 
-    async fn get_results_async<U>(self, asc: &AsyncConn) -> Result<Vec<U>, E>
+    async fn get_results_async<'a, U>(self, asc: &AsyncConn) -> Result<Vec<U>, E>
     where
         U: Send + 'static,
-        Self: LoadQuery<Conn, U>;
+        Self: LoadQuery<'a, Conn, U>;
 
-    async fn first_async<U>(self, asc: &AsyncConn) -> Result<U, E>
+    async fn first_async<'a, U>(self, asc: &AsyncConn) -> Result<U, E>
     where
         U: Send + 'static,
         Self: LimitDsl,
-        Limit<Self>: LoadQuery<Conn, U>;
+        Limit<Self>: LoadQuery<'a, Conn, U>;
 }
 
 #[async_trait]
@@ -94,36 +94,36 @@ where
         asc.run(|conn| self.execute(conn).map_err(E::from)).await
     }
 
-    async fn load_async<U>(self, asc: &AsyncConn) -> Result<Vec<U>, E>
+    async fn load_async<'a, U>(self, asc: &AsyncConn) -> Result<Vec<U>, E>
     where
         U: Send + 'static,
-        Self: LoadQuery<Conn, U>,
+        Self: LoadQuery<'a, Conn, U>,
     {
         asc.run(|conn| self.load(conn).map_err(E::from)).await
     }
 
-    async fn get_result_async<U>(self, asc: &AsyncConn) -> Result<U, E>
+    async fn get_result_async<'a, U>(self, asc: &AsyncConn) -> Result<U, E>
     where
         U: Send + 'static,
-        Self: LoadQuery<Conn, U>,
+        Self: LoadQuery<'a, Conn, U>,
     {
         asc.run(|conn| self.get_result(conn).map_err(E::from)).await
     }
 
-    async fn get_results_async<U>(self, asc: &AsyncConn) -> Result<Vec<U>, E>
+    async fn get_results_async<'a, U>(self, asc: &AsyncConn) -> Result<Vec<U>, E>
     where
         U: Send + 'static,
-        Self: LoadQuery<Conn, U>,
+        Self: LoadQuery<'a, Conn, U>,
     {
         asc.run(|conn| self.get_results(conn).map_err(E::from))
             .await
     }
 
-    async fn first_async<U>(self, asc: &AsyncConn) -> Result<U, E>
+    async fn first_async<'a, U>(self, asc: &AsyncConn) -> Result<U, E>
     where
         U: Send + 'static,
         Self: LimitDsl,
-        Limit<Self>: LoadQuery<Conn, U>,
+        Limit<Self>: LoadQuery<'a, Conn, U>,
     {
         asc.run(|conn| self.first(conn).map_err(E::from)).await
     }
