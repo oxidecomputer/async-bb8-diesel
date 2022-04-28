@@ -11,14 +11,14 @@ table! {
 }
 
 #[derive(AsChangeset, Insertable, Queryable, PartialEq, Clone)]
-#[table_name = "users"]
+#[diesel(table_name = users)]
 pub struct User {
     pub id: i32,
     pub name: String,
 }
 
 #[derive(AsChangeset, Identifiable)]
-#[table_name = "users"]
+#[diesel(table_name = users)]
 pub struct UserUpdate<'a> {
     pub id: i32,
     pub name: &'a str,
