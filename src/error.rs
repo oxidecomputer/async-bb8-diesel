@@ -5,6 +5,7 @@
 //! API, with calls to [`tokio::task::spawn_blocking`] to safely
 //! perform synchronous operations from an asynchronous task.
 
+use diesel::result::Error as DieselError;
 use thiserror::Error;
 
 /// Syntactic sugar around a Result returning an [`ConnectionError`].
@@ -17,11 +18,27 @@ pub enum ConnectionError {
     Checkout(#[from] diesel::r2d2::Error),
 
     #[error("Failed to issue a query: {0}")]
-    Query(#[from] diesel::result::Error),
+    Query(#[from] DieselError),
 }
 
 /// Syntactic sugar around a Result returning an [`PoolError`].
 pub type PoolResult<R> = Result<R, PoolError>;
+
+/// Async varient of
+/// <https://docs.diesel.rs/master/diesel/prelude/trait.OptionalExtension.html>.
+pub trait OptionalExtension<T> {
+    fn optional(self) -> Result<Option<T>, PoolError>;
+}
+
+impl<T> OptionalExtension<T> for PoolResult<T> {
+    fn optional(self) -> Result<Option<T>, PoolError> {
+        match self {
+            Ok(value) => Ok(Some(value)),
+            Err(PoolError::Connection(ConnectionError::Query(DieselError::NotFound))) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+}
 
 /// Describes an error performing an operation from a connection pool.
 ///
@@ -36,8 +53,8 @@ pub enum PoolError {
     Timeout,
 }
 
-impl From<diesel::result::Error> for PoolError {
-    fn from(error: diesel::result::Error) -> Self {
+impl From<DieselError> for PoolError {
+    fn from(error: DieselError) -> Self {
         PoolError::Connection(ConnectionError::Query(error))
     }
 }
