@@ -24,7 +24,7 @@ pub enum ConnectionError {
 /// Syntactic sugar around a Result returning an [`PoolError`].
 pub type PoolResult<R> = Result<R, PoolError>;
 
-/// Async varient of
+/// Async variant of
 /// <https://docs.diesel.rs/master/diesel/prelude/trait.OptionalExtension.html>.
 pub trait OptionalExtension<T> {
     fn optional(self) -> Result<Option<T>, PoolError>;
