@@ -6,6 +6,7 @@
 //! perform synchronous operations from an asynchronous task.
 
 use diesel::result::Error as DieselError;
+use diesel::OptionalExtension as OtherOptionalExtension;
 use thiserror::Error;
 
 /// Syntactic sugar around a Result returning an [`ConnectionError`].
@@ -32,11 +33,15 @@ pub trait OptionalExtension<T> {
 
 impl<T> OptionalExtension<T> for PoolResult<T> {
     fn optional(self) -> Result<Option<T>, PoolError> {
-        match self {
-            Ok(value) => Ok(Some(value)),
-            Err(PoolError::Connection(ConnectionError::Query(DieselError::NotFound))) => Ok(None),
-            Err(e) => Err(e),
-        }
+        let self_as_query_result: diesel::QueryResult<T> = match self {
+            Ok(value) => Ok(value),
+            Err(PoolError::Connection(ConnectionError::Query(error_kind))) => Err(error_kind),
+            Err(e) => return Err(e),
+        };
+
+        self_as_query_result
+            .optional()
+            .map_err(|e| PoolError::Connection(ConnectionError::Query(e)))
     }
 }
 
