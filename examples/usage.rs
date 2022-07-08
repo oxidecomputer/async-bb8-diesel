@@ -1,5 +1,6 @@
 use async_bb8_diesel::{
-    AsyncConnection, AsyncRunQueryDsl, AsyncSaveChangesDsl, ConnectionError, PoolError,
+    AsyncConnection, AsyncRunQueryDsl, AsyncSaveChangesDsl, ConnectionError, OptionalExtension,
+    PoolError,
 };
 use diesel::{pg::PgConnection, prelude::*};
 
@@ -108,4 +109,13 @@ async fn main() {
         })
         .await
         .unwrap_err();
+
+    // Access the result via OptionalExtension
+    assert!(dsl::users
+        .filter(dsl::id.eq(12345))
+        .first_async::<User>(&pool)
+        .await
+        .optional()
+        .unwrap()
+        .is_none());
 }

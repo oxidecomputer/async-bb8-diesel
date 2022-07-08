@@ -15,4 +15,4 @@ pub use async_traits::{
 };
 pub use connection::Connection;
 pub use connection_manager::ConnectionManager;
-pub use error::{ConnectionError, ConnectionResult, PoolError, PoolResult};
+pub use error::{ConnectionError, ConnectionResult, OptionalExtension, PoolError, PoolResult};

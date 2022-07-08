@@ -9,7 +9,7 @@ use tokio::task;
 /// An async-safe analogue of any connection that implements
 /// [`diesel::Connection`].
 ///
-/// These connections are created by [`ConnectionManager`].
+/// These connections are created by [`crate::ConnectionManager`].
 ///
 /// All blocking methods within this type delegate to
 /// [`tokio::task::spawn_blocking`], meaning they won't block
