@@ -13,8 +13,8 @@ bb8 = "0.8"
 async-trait = "0.1.56"
 diesel = { version = "2.0.0-rc.0", default-features = false, features = [ "r2d2" ] }
 thiserror = "1.0"
-tokio = { version = "1.17", default-features = false, features = [ "rt-multi-thread" ] }
+tokio = { version = "1.19", default-features = false, features = [ "rt-multi-thread" ] }
 
 [dev-dependencies]
 diesel = { version = "2.0.0-rc.0", features = [ "postgres", "r2d2" ] }
-tokio = { version = "1.17", features = [ "macros"] }
+tokio = { version = "1.19", features = [ "macros"] }
