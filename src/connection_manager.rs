@@ -3,7 +3,7 @@
 use crate::{Connection, ConnectionError, PoolError, PoolResult};
 use async_trait::async_trait;
 use diesel::r2d2::{self, ManageConnection, R2D2Connection};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::task;
 
 /// A connection manager which implements [`bb8::ManageConnection`] to
@@ -123,17 +123,18 @@ where
     Conn: 'static + R2D2Connection,
     bb8::Pool<ConnectionManager<Conn>>: crate::AsyncSimpleConnection<Conn, PoolError>,
 {
-    #[inline]
-    async fn run<R, E, Func>(&self, f: Func) -> Result<R, E>
-    where
-        R: Send + 'static,
-        E: From<PoolError> + Send + 'static,
-        Func: FnOnce(&mut Conn) -> Result<R, E> + Send + 'static,
-    {
+    type OwnedConnection = bb8::PooledConnection<'static, ConnectionManager<Conn>>;
+
+    async fn get_owned_connection(&self) -> Result<Self::OwnedConnection, PoolError> {
         let self_ = self.clone();
-        let conn = self_.get_owned().await.map_err(PoolError::from)?;
-        task::spawn_blocking(move || f(&mut *conn.inner()))
-            .await
-            .unwrap() // Propagate panics
+        Ok(self_.get_owned().await.map_err(PoolError::from)?)
+    }
+
+    fn as_sync_conn(owned: &Self::OwnedConnection) -> MutexGuard<'_, Conn> {
+        owned.inner()
+    }
+
+    fn as_async_conn(owned: &Self::OwnedConnection) -> &crate::connection::Connection<Conn> {
+        &*owned
     }
 }
