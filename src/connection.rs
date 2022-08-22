@@ -3,7 +3,7 @@
 use crate::{ConnectionError, ConnectionResult};
 use async_trait::async_trait;
 use diesel::r2d2::R2D2Connection;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::task;
 
 /// An async-safe analogue of any connection that implements
@@ -25,7 +25,7 @@ impl<C> Connection<C> {
     //
     // As this is a blocking mutex, it's recommended to avoid invoking
     // this function from an asynchronous context.
-    pub(crate) fn inner(&self) -> std::sync::MutexGuard<'_, C> {
+    pub(crate) fn inner(&self) -> MutexGuard<'_, C> {
         self.0.lock().unwrap()
     }
 }
@@ -52,16 +52,17 @@ where
     Conn: 'static + R2D2Connection,
     Connection<Conn>: crate::AsyncSimpleConnection<Conn, ConnectionError>,
 {
-    #[inline]
-    async fn run<R, E, Func>(&self, f: Func) -> Result<R, E>
-    where
-        R: Send + 'static,
-        E: From<ConnectionError> + Send + 'static,
-        Func: FnOnce(&mut Conn) -> Result<R, E> + Send + 'static,
-    {
-        let diesel_conn = Connection(self.0.clone());
-        task::spawn_blocking(move || f(&mut *diesel_conn.inner()))
-            .await
-            .unwrap() // Propagate panics
+    type OwnedConnection = Connection<Conn>;
+
+    async fn get_owned_connection(&self) -> Result<Self::OwnedConnection, ConnectionError> {
+        Ok(Connection(self.0.clone()))
+    }
+
+    fn as_sync_conn(owned: &Self::OwnedConnection) -> MutexGuard<'_, Conn> {
+        owned.inner()
+    }
+
+    fn as_async_conn(owned: &Self::OwnedConnection) -> &Connection<Conn> {
+        owned
     }
 }

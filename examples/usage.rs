@@ -110,6 +110,18 @@ async fn main() {
         .await
         .unwrap_err();
 
+    // Asynchronous transaction.
+    pool.transaction_async(|conn| async move {
+        diesel::update(dsl::users)
+            .filter(dsl::id.eq(0))
+            .set(dsl::name.eq("Let's change the name again"))
+            .execute_async(&conn)
+            .await
+            .map_err(|e| PoolError::Connection(e))
+    })
+    .await
+    .unwrap();
+
     // Access the result via OptionalExtension
     assert!(dsl::users
         .filter(dsl::id.eq(12345))
