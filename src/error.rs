@@ -15,8 +15,8 @@ pub type ConnectionResult<R> = Result<R, ConnectionError>;
 /// Errors returned directly from Connection.
 #[derive(Error, Debug)]
 pub enum ConnectionError {
-    #[error("Failed to checkout a connection: {0}")]
-    Checkout(#[from] diesel::r2d2::Error),
+    #[error("Connection error: {0}")]
+    Connection(#[from] diesel::r2d2::Error),
 
     #[error("Failed to issue a query: {0}")]
     Query(#[from] DieselError),
