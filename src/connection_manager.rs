@@ -80,7 +80,7 @@ where
         self.run_blocking(|m| m.connect())
             .await
             .map(Connection::new)
-            .map_err(ConnectionError::Checkout)
+            .map_err(ConnectionError::Connection)
     }
 
     async fn is_valid(&self, conn: &mut Self::Connection) -> Result<(), Self::Error> {
