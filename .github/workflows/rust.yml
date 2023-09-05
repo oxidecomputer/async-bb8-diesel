@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     # actions/checkout@v2
-    - uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744
+    - uses: actions/checkout@72f2cec99f417b1a1c5e2e88945068983b7965f9
     - uses: actions-rs/toolchain@88dc2356392166efad76775c878094f4e83ff746
       with:
         toolchain: stable
@@ -30,7 +30,7 @@ jobs:
         os: [ ubuntu-latest, macos-12 ]
     steps:
     # actions/checkout@v2
-    - uses: actions/checkout@f43a0e5ff2bd294095638e18286ca9a3d1956744
+    - uses: actions/checkout@72f2cec99f417b1a1c5e2e88945068983b7965f9
     - name: Build
       run: cargo build --tests --verbose
     - name: Run tests
