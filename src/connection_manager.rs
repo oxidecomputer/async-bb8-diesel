@@ -27,17 +27,9 @@ use std::sync::{Arc, Mutex};
 ///     let mgr = async_bb8_diesel::ConnectionManager::<PgConnection>::new("localhost:1234");
 ///     let pool = bb8::Pool::builder().build(mgr).await.unwrap();
 ///
-///     // You can acquire connections to the pool manually...
 ///     diesel::insert_into(dsl::users)
 ///         .values(dsl::id.eq(1337))
 ///         .execute_async(&*pool.get().await.unwrap())
-///         .await
-///         .unwrap();
-///
-///     // ... Or just issue them to the pool directly.
-///     diesel::insert_into(dsl::users)
-///         .values(dsl::id.eq(1337))
-///         .execute_async(&pool)
 ///         .await
 ///         .unwrap();
 /// }
