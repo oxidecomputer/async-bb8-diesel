@@ -26,11 +26,11 @@ pub enum ConnectionError {
 pub type PoolResult<R> = Result<R, PoolError>;
 
 /// Async variant of [diesel::prelude::OptionalExtension].
-pub trait OptionalExtension<T> {
-    fn optional(self) -> Result<Option<T>, PoolError>;
+pub trait OptionalExtension<T, E> {
+    fn optional(self) -> Result<Option<T>, E>;
 }
 
-impl<T> OptionalExtension<T> for PoolResult<T> {
+impl<T> OptionalExtension<T, PoolError> for Result<T, PoolError> {
     fn optional(self) -> Result<Option<T>, PoolError> {
         let self_as_query_result: diesel::QueryResult<T> = match self {
             Ok(value) => Ok(value),
@@ -41,6 +41,20 @@ impl<T> OptionalExtension<T> for PoolResult<T> {
         self_as_query_result
             .optional()
             .map_err(|e| PoolError::Connection(ConnectionError::Query(e)))
+    }
+}
+
+impl<T> OptionalExtension<T, ConnectionError> for Result<T, ConnectionError> {
+    fn optional(self) -> Result<Option<T>, ConnectionError> {
+        let self_as_query_result: diesel::QueryResult<T> = match self {
+            Ok(value) => Ok(value),
+            Err(ConnectionError::Query(error_kind)) => Err(error_kind),
+            Err(e) => return Err(e),
+        };
+
+        self_as_query_result
+            .optional()
+            .map_err(|e| ConnectionError::Query(e))
     }
 }
 
