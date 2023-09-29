@@ -1,10 +1,9 @@
 //! An async-safe connection pool for Diesel.
 
-use crate::{Connection, ConnectionError, PoolError, PoolResult};
+use crate::{Connection, ConnectionError};
 use async_trait::async_trait;
 use diesel::r2d2::{self, ManageConnection, R2D2Connection};
-use std::sync::{Arc, Mutex, MutexGuard};
-use tokio::task;
+use std::sync::{Arc, Mutex};
 
 /// A connection manager which implements [`bb8::ManageConnection`] to
 /// integrate with bb8.
@@ -28,17 +27,9 @@ use tokio::task;
 ///     let mgr = async_bb8_diesel::ConnectionManager::<PgConnection>::new("localhost:1234");
 ///     let pool = bb8::Pool::builder().build(mgr).await.unwrap();
 ///
-///     // You can acquire connections to the pool manually...
 ///     diesel::insert_into(dsl::users)
 ///         .values(dsl::id.eq(1337))
 ///         .execute_async(&*pool.get().await.unwrap())
-///         .await
-///         .unwrap();
-///
-///     // ... Or just issue them to the pool directly.
-///     diesel::insert_into(dsl::users)
-///         .values(dsl::id.eq(1337))
-///         .execute_async(&pool)
 ///         .await
 ///         .unwrap();
 /// }
@@ -97,44 +88,5 @@ where
         // inner method without blocking as this method is not async, but `bb8`
         // indicates that this method is not mandatory.
         false
-    }
-}
-
-#[async_trait]
-impl<Conn> crate::AsyncSimpleConnection<Conn, PoolError> for bb8::Pool<ConnectionManager<Conn>>
-where
-    Conn: 'static + R2D2Connection,
-{
-    #[inline]
-    async fn batch_execute_async(&self, query: &str) -> PoolResult<()> {
-        let self_ = self.clone();
-        let query = query.to_string();
-        let conn = self_.get_owned().await.map_err(PoolError::from)?;
-        task::spawn_blocking(move || conn.inner().batch_execute(&query))
-            .await
-            .unwrap() // Propagate panics
-            .map_err(PoolError::from)
-    }
-}
-
-#[async_trait]
-impl<Conn> crate::AsyncConnection<Conn, PoolError> for bb8::Pool<ConnectionManager<Conn>>
-where
-    Conn: 'static + R2D2Connection,
-    bb8::Pool<ConnectionManager<Conn>>: crate::AsyncSimpleConnection<Conn, PoolError>,
-{
-    type OwnedConnection = bb8::PooledConnection<'static, ConnectionManager<Conn>>;
-
-    async fn get_owned_connection(&self) -> Result<Self::OwnedConnection, PoolError> {
-        let self_ = self.clone();
-        Ok(self_.get_owned().await.map_err(PoolError::from)?)
-    }
-
-    fn as_sync_conn(owned: &Self::OwnedConnection) -> MutexGuard<'_, Conn> {
-        owned.inner()
-    }
-
-    fn as_async_conn(owned: &Self::OwnedConnection) -> &crate::connection::Connection<Conn> {
-        &*owned
     }
 }

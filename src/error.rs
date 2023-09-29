@@ -27,20 +27,20 @@ pub type PoolResult<R> = Result<R, PoolError>;
 
 /// Async variant of [diesel::prelude::OptionalExtension].
 pub trait OptionalExtension<T> {
-    fn optional(self) -> Result<Option<T>, PoolError>;
+    fn optional(self) -> Result<Option<T>, ConnectionError>;
 }
 
-impl<T> OptionalExtension<T> for PoolResult<T> {
-    fn optional(self) -> Result<Option<T>, PoolError> {
+impl<T> OptionalExtension<T> for Result<T, ConnectionError> {
+    fn optional(self) -> Result<Option<T>, ConnectionError> {
         let self_as_query_result: diesel::QueryResult<T> = match self {
             Ok(value) => Ok(value),
-            Err(PoolError::Connection(ConnectionError::Query(error_kind))) => Err(error_kind),
+            Err(ConnectionError::Query(error_kind)) => Err(error_kind),
             Err(e) => return Err(e),
         };
 
         self_as_query_result
             .optional()
-            .map_err(|e| PoolError::Connection(ConnectionError::Query(e)))
+            .map_err(|e| ConnectionError::Query(e))
     }
 }
 

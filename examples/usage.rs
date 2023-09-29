@@ -1,6 +1,5 @@
 use async_bb8_diesel::{
     AsyncConnection, AsyncRunQueryDsl, AsyncSaveChangesDsl, ConnectionError, OptionalExtension,
-    PoolError,
 };
 use diesel::{pg::PgConnection, prelude::*};
 
@@ -29,7 +28,7 @@ pub struct UserUpdate<'a> {
 #[derive(thiserror::Error, Debug)]
 enum MyError {
     #[error("DB error")]
-    Db(#[from] PoolError),
+    Db(#[from] ConnectionError),
 
     #[error("Custom transaction error")]
     Other,
@@ -37,7 +36,7 @@ enum MyError {
 
 impl From<diesel::result::Error> for MyError {
     fn from(error: diesel::result::Error) -> Self {
-        MyError::Db(PoolError::Connection(ConnectionError::Query(error)))
+        MyError::Db(ConnectionError::Query(error))
     }
 }
 
@@ -47,11 +46,12 @@ async fn main() {
 
     let manager = async_bb8_diesel::ConnectionManager::<PgConnection>::new("localhost:1234");
     let pool = bb8::Pool::builder().build(manager).await.unwrap();
+    let conn = pool.get().await.unwrap();
 
     // Insert by values
     let _ = diesel::insert_into(dsl::users)
         .values((dsl::id.eq(0), dsl::name.eq("Jim")))
-        .execute_async(&pool)
+        .execute_async(&*conn)
         .await
         .unwrap();
 
@@ -61,34 +61,34 @@ async fn main() {
             id: 0,
             name: "Jim".to_string(),
         })
-        .execute_async(&pool)
+        .execute_async(&*conn)
         .await
         .unwrap();
 
     // Load
-    let _ = dsl::users.get_result_async::<User>(&pool).await.unwrap();
+    let _ = dsl::users.get_result_async::<User>(&*conn).await.unwrap();
 
     // Update
     let _ = diesel::update(dsl::users)
         .filter(dsl::id.eq(0))
         .set(dsl::name.eq("Jim, But Different"))
-        .execute_async(&pool)
+        .execute_async(&*conn)
         .await
         .unwrap();
 
     // Update via save_changes
     let update = &UserUpdate { id: 0, name: "Jim" };
-    let _ = update.save_changes_async::<User>(&pool).await.unwrap();
+    let _ = update.save_changes_async::<User>(&*conn).await.unwrap();
 
     // Delete
     let _ = diesel::delete(dsl::users)
         .filter(dsl::id.eq(0))
-        .execute_async(&pool)
+        .execute_async(&*conn)
         .await
         .unwrap();
 
     // Transaction with multiple operations
-    pool.transaction(|conn| {
+    conn.transaction(|conn| {
         diesel::insert_into(dsl::users)
             .values((dsl::id.eq(0), dsl::name.eq("Jim")))
             .execute(conn)
@@ -97,13 +97,13 @@ async fn main() {
             .values((dsl::id.eq(1), dsl::name.eq("Another Jim")))
             .execute(conn)
             .unwrap();
-        Ok::<(), PoolError>(())
+        Ok::<(), ConnectionError>(())
     })
     .await
     .unwrap();
 
     // Transaction returning custom error types.
-    let _: MyError = pool
+    let _: MyError = conn
         .transaction(|_| {
             return Err::<(), MyError>(MyError::Other {});
         })
@@ -111,13 +111,12 @@ async fn main() {
         .unwrap_err();
 
     // Asynchronous transaction.
-    pool.transaction_async(|conn| async move {
+    conn.transaction_async(|conn| async move {
         diesel::update(dsl::users)
             .filter(dsl::id.eq(0))
             .set(dsl::name.eq("Let's change the name again"))
             .execute_async(&conn)
             .await
-            .map_err(|e| PoolError::Connection(e))
     })
     .await
     .unwrap();
@@ -125,7 +124,7 @@ async fn main() {
     // Access the result via OptionalExtension
     assert!(dsl::users
         .filter(dsl::id.eq(12345))
-        .first_async::<User>(&pool)
+        .first_async::<User>(&*conn)
         .await
         .optional()
         .unwrap()
