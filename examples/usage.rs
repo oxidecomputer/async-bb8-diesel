@@ -1,6 +1,5 @@
-use async_bb8_diesel::{
-    AsyncConnection, AsyncRunQueryDsl, AsyncSaveChangesDsl, ConnectionError, OptionalExtension,
-};
+use async_bb8_diesel::{AsyncConnection, AsyncRunQueryDsl, AsyncSaveChangesDsl, ConnectionError};
+use diesel::OptionalExtension;
 use diesel::{pg::PgConnection, prelude::*};
 
 table! {

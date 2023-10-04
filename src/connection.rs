@@ -1,6 +1,5 @@
 //! An async wrapper around a [`diesel::Connection`].
 
-use crate::{ConnectionError, ConnectionResult};
 use async_trait::async_trait;
 use diesel::r2d2::R2D2Connection;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -31,31 +30,30 @@ impl<C> Connection<C> {
 }
 
 #[async_trait]
-impl<Conn> crate::AsyncSimpleConnection<Conn, ConnectionError> for Connection<Conn>
+impl<Conn> crate::AsyncSimpleConnection<Conn> for Connection<Conn>
 where
     Conn: 'static + R2D2Connection,
 {
     #[inline]
-    async fn batch_execute_async(&self, query: &str) -> ConnectionResult<()> {
+    async fn batch_execute_async(&self, query: &str) -> Result<(), diesel::result::Error> {
         let diesel_conn = Connection(self.0.clone());
         let query = query.to_string();
         task::spawn_blocking(move || diesel_conn.inner().batch_execute(&query))
             .await
             .unwrap() // Propagate panics
-            .map_err(ConnectionError::from)
     }
 }
 
 #[async_trait]
-impl<Conn> crate::AsyncConnection<Conn, ConnectionError> for Connection<Conn>
+impl<Conn> crate::AsyncConnection<Conn> for Connection<Conn>
 where
     Conn: 'static + R2D2Connection,
-    Connection<Conn>: crate::AsyncSimpleConnection<Conn, ConnectionError>,
+    Connection<Conn>: crate::AsyncSimpleConnection<Conn>,
 {
     type OwnedConnection = Connection<Conn>;
 
-    async fn get_owned_connection(&self) -> Result<Self::OwnedConnection, ConnectionError> {
-        Ok(Connection(self.0.clone()))
+    async fn get_owned_connection(&self) -> Self::OwnedConnection {
+        Connection(self.0.clone())
     }
 
     fn as_sync_conn(owned: &Self::OwnedConnection) -> MutexGuard<'_, Conn> {

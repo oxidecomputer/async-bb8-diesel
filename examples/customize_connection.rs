@@ -15,6 +15,7 @@ impl bb8::CustomizeConnection<DieselPgConn, ConnectionError> for ConnectionCusto
         connection
             .batch_execute_async("please execute some raw sql for me")
             .await
+            .map_err(ConnectionError::from)
     }
 }
 
