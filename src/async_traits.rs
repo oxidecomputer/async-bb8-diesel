@@ -91,19 +91,6 @@ where
         self.run(|conn| conn.transaction(|c| f(c))).await
     }
 
-    // TODO(for both the transaction functions below): The ideal interface would
-    // pass the "async_conn" object to the underlying function "f" by reference.
-    //
-    // This would prevent the user-supplied closure + future from using the
-    // connection *beyond* the duration of the transaction, which would be
-    // bad.
-    //
-    // However, I'm struggling to get these lifetimes to work properly. If
-    // you can figure out a way to convince that the reference lives long
-    // enough to be referenceable by a Future, but short enough that we can
-    // guarantee it doesn't live persist after this function returns, feel
-    // free to make that change.
-
     async fn transaction_async<R, E, Func, Fut, 'a>(&'a self, f: Func) -> Result<R, E>
     where
         R: Send + 'static,
@@ -125,6 +112,18 @@ where
         })
         .await?;
 
+        // TODO: The ideal interface would pass the "async_conn" object to the
+        // underlying function "f" by reference.
+        //
+        // This would prevent the user-supplied closure + future from using the
+        // connection *beyond* the duration of the transaction, which would be
+        // bad.
+        //
+        // However, I'm struggling to get these lifetimes to work properly. If
+        // you can figure out a way to convince that the reference lives long
+        // enough to be referenceable by a Future, but short enough that we can
+        // guarantee it doesn't live persist after this function returns, feel
+        // free to make that change.
         let async_conn = SingleConnection(Self::as_async_conn(&conn).0.clone());
         match f(async_conn).await {
             Ok(value) => {
@@ -142,59 +141,6 @@ where
                 {
                     Ok(()) => Err(user_error),
                     Err(err) => Err(err.into()),
-                }
-            }
-        }
-    }
-
-    async fn transaction_async_with_retry<R, E, Func, Fut, RetryFunc, RetryFut, 'a>(
-        &'a self,
-        f: Func,
-        should_retry: RetryFunc,
-    ) -> Result<R, E>
-    where
-        R: Send + 'static,
-        E: From<DieselError> + Send + 'static,
-        Fut: Future<Output = Result<R, E>> + Send,
-        Func: Fn(SingleConnection<Conn>) -> Fut + Send + Sync,
-        RetryFut: Future<Output = bool> + Send,
-        RetryFunc: Fn() -> RetryFut + Send + Sync,
-    {
-        // Check out a connection once, and use it for the duration of the
-        // operation.
-        let conn = Arc::new(self.get_owned_connection().await);
-
-        // This function mimics the implementation of:
-        // https://docs.diesel.rs/master/diesel/connection/trait.TransactionManager.html#method.transaction
-        //
-        // However, it modifies all callsites to instead issue
-        // known-to-be-synchronous operations from an asynchronous context.
-        Self::run_with_shared_connection(conn.clone(), |conn| {
-            Conn::TransactionManager::begin_transaction(conn).map_err(E::from)
-        })
-        .await?;
-
-        loop {
-            let async_conn = SingleConnection(Self::as_async_conn(&conn).0.clone());
-            match f(async_conn).await {
-                Ok(value) => {
-                    Self::run_with_shared_connection(conn.clone(), |conn| {
-                        Conn::TransactionManager::commit_transaction(conn).map_err(E::from)
-                    })
-                    .await?;
-                    return Ok(value);
-                }
-                Err(user_error) => {
-                    match Self::run_with_shared_connection(conn.clone(), |conn| {
-                        Conn::TransactionManager::rollback_transaction(conn).map_err(E::from)
-                    })
-                    .await
-                    {
-                        Ok(()) => return Err(user_error),
-                        Err(err) => {
-                            return Err(err.into());
-                        }
-                    }
                 }
             }
         }
