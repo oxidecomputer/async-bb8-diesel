@@ -82,15 +82,6 @@ where
             .unwrap() // Propagate panics
     }
 
-    async fn transaction<R, E, Func>(&self, f: Func) -> Result<R, E>
-    where
-        R: Send + 'static,
-        E: From<DieselError> + Send + 'static,
-        Func: FnOnce(&mut Conn) -> Result<R, E> + Send + 'static,
-    {
-        self.run(|conn| conn.transaction(|c| f(c))).await
-    }
-
     async fn transaction_async<R, E, Func, Fut, 'a>(&'a self, f: Func) -> Result<R, E>
     where
         R: Send + 'static,

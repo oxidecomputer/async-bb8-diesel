@@ -87,14 +87,16 @@ async fn main() {
         .unwrap();
 
     // Transaction with multiple operations
-    conn.transaction(|conn| {
+    conn.transaction_async(|conn| async move {
         diesel::insert_into(dsl::users)
             .values((dsl::id.eq(0), dsl::name.eq("Jim")))
-            .execute(conn)
+            .execute_async(&conn)
+            .await
             .unwrap();
         diesel::insert_into(dsl::users)
             .values((dsl::id.eq(1), dsl::name.eq("Another Jim")))
-            .execute(conn)
+            .execute_async(&conn)
+            .await
             .unwrap();
         Ok::<(), ConnectionError>(())
     })
@@ -103,22 +105,11 @@ async fn main() {
 
     // Transaction returning custom error types.
     let _: MyError = conn
-        .transaction(|_| {
+        .transaction_async(|_| async {
             return Err::<(), MyError>(MyError::Other {});
         })
         .await
         .unwrap_err();
-
-    // Asynchronous transaction.
-    conn.transaction_async(|conn| async move {
-        diesel::update(dsl::users)
-            .filter(dsl::id.eq(0))
-            .set(dsl::name.eq("Let's change the name again"))
-            .execute_async(&conn)
-            .await
-    })
-    .await
-    .unwrap();
 
     // Access the result via OptionalExtension
     assert!(dsl::users
