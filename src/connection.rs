@@ -1,5 +1,7 @@
 //! An async wrapper around a [`diesel::Connection`].
 
+use crate::async_traits::PostgresConn;
+
 use async_trait::async_trait;
 use diesel::r2d2::R2D2Connection;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -47,7 +49,7 @@ where
 #[async_trait]
 impl<Conn> crate::AsyncConnection<Conn> for Connection<Conn>
 where
-    Conn: 'static + R2D2Connection,
+    Conn: 'static + R2D2Connection + PostgresConn,
     Connection<Conn>: crate::AsyncSimpleConnection<Conn>,
 {
     type OwnedConnection = Connection<Conn>;
