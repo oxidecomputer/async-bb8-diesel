@@ -77,7 +77,14 @@ where
     async fn is_valid(&self, conn: &mut Self::Connection) -> Result<(), Self::Error> {
         let c = Connection(conn.0.clone());
         self.run_blocking(move |m| {
-            m.is_valid(&mut *c.inner())?;
+            if m.has_broken(&mut *c.inner()) {
+                return Err(ConnectionError::Connection(
+                    diesel::r2d2::Error::ConnectionError(BadConnection(
+                        "connection brokenn".to_string(),
+                    )),
+                ));
+            }
+            // m.is_valid(&mut *c.inner())?;
             Ok(())
         })
         .await
