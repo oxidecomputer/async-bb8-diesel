@@ -79,11 +79,12 @@ where
         let c = Connection(conn.0.clone());
         self.run_blocking(move |m| {
             if m.has_broken(&mut *c.inner()) {
-                return Err(ConnectionError::Connection(
-                    diesel::r2d2::Error::ConnectionError(BadConnection(
-                        "connection brokenn".to_string(),
-                    )),
-                ));
+                // let error = Err(ConnectionError::Connection(
+                //     diesel::r2d2::Error::ConnectionError(BadConnection(
+                //         "connection brokenn".to_string(),
+                //     )),
+                // ));
+                panic!("connection broken");
             }
             // m.is_valid(&mut *c.inner())?;
             Ok(())
