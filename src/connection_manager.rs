@@ -3,6 +3,7 @@
 use crate::{Connection, ConnectionError};
 use async_trait::async_trait;
 use diesel::r2d2::{self, ManageConnection, R2D2Connection};
+use diesel::ConnectionError::BadConnection;
 use std::sync::{Arc, Mutex};
 
 /// A connection manager which implements [`bb8::ManageConnection`] to
