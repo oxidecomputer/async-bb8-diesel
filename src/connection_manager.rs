@@ -3,7 +3,6 @@
 use crate::{Connection, ConnectionError};
 use async_trait::async_trait;
 use diesel::r2d2::{self, ManageConnection, R2D2Connection};
-use diesel::ConnectionError::BadConnection;
 use std::sync::{Arc, Mutex};
 
 /// A connection manager which implements [`bb8::ManageConnection`] to
@@ -58,6 +57,17 @@ impl<T: Send + 'static> ConnectionManager<T> {
             // Intentionally panic if the inner closure panics.
             .unwrap()
     }
+
+    fn run<R, F>(&self, f: F) -> R
+    where
+        R: Send + 'static,
+        F: Send + 'static + FnOnce(&r2d2::ConnectionManager<T>) -> R,
+    {
+        let cloned = self.inner.clone();
+        let cloned = cloned.lock().unwrap();
+        f(&*cloned)
+    }
+
 }
 
 #[async_trait]
@@ -75,22 +85,20 @@ where
             .map_err(ConnectionError::Connection)
     }
 
+    // async fn is_valid(&self, conn: &mut Self::Connection) -> Result<(), Self::Error> {
+    //     let c = Connection(conn.0.clone());
+    //     self.run_blocking(move |m| {
+    //         m.is_valid(&mut *c.inner())?;
+    //         Ok(())
+    //     })
+    //     .await
+    // }
+
     async fn is_valid(&self, conn: &mut Self::Connection) -> Result<(), Self::Error> {
         let c = Connection(conn.0.clone());
-        self.run_blocking(move |m| {
-            if m.has_broken(&mut *c.inner()) {
-                // let error = Err(ConnectionError::Connection(
-                //     diesel::r2d2::Error::ConnectionError(BadConnection(
-                //         "connection brokenn".to_string(),
-                //     )),
-                // ));
-                panic!("connection broken");
-            }
-            // m.is_valid(&mut *c.inner())?;
-            Ok(())
-        })
-        .await
+        self.run(move |m| closure_for_is_valid_of_manager(m, c))
     }
+
 
     fn has_broken(&self, _: &mut Self::Connection) -> bool {
         // Diesel returns this value internally. We have no way of calling the
@@ -99,3 +107,22 @@ where
         false
     }
 }
+
+#[tracing::instrument(skip_all)]
+fn closure_for_is_valid_of_manager<T>(
+    m: &r2d2::ConnectionManager<T>,
+    conn: Connection<T>,
+) -> Result<(), ConnectionError>
+where
+    T: R2D2Connection + Send + 'static,
+{
+    if m.has_broken(&mut *conn.inner()) {
+        return Err(ConnectionError::Connection(
+            diesel::r2d2::Error::ConnectionError(diesel::ConnectionError::BadConnection(
+                "connection brokenn".to_string(),
+            )),
+        ));
+    }
+    Ok(())
+}
+
