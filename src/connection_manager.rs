@@ -58,6 +58,7 @@ impl<T: Send + 'static> ConnectionManager<T> {
             .unwrap()
     }
 
+    #[cfg(feature = "use_has_broken_as_valid_check")]
     fn run<R, F>(&self, f: F) -> R
     where
         R: Send + 'static,
@@ -67,7 +68,6 @@ impl<T: Send + 'static> ConnectionManager<T> {
         let cloned = cloned.lock().unwrap();
         f(&*cloned)
     }
-
 }
 
 #[async_trait]
@@ -85,20 +85,20 @@ where
             .map_err(ConnectionError::Connection)
     }
 
-    // async fn is_valid(&self, conn: &mut Self::Connection) -> Result<(), Self::Error> {
-    //     let c = Connection(conn.0.clone());
-    //     self.run_blocking(move |m| {
-    //         m.is_valid(&mut *c.inner())?;
-    //         Ok(())
-    //     })
-    //     .await
-    // }
-
     async fn is_valid(&self, conn: &mut Self::Connection) -> Result<(), Self::Error> {
         let c = Connection(conn.0.clone());
-        self.run(move |m| closure_for_is_valid_of_manager(m, c))
-    }
 
+        #[cfg(not(feature = "use_has_broken_as_valid_check"))]
+        {
+            self.run_blocking(move |m| closure_for_is_valid_of_manager(m, c))
+                .await
+        }
+
+        #[cfg(feature = "use_has_broken_as_valid_check")]
+        {
+            self.run(move |m| closure_for_is_valid_of_manager(m, c))
+        }
+    }
 
     fn has_broken(&self, _: &mut Self::Connection) -> bool {
         // Diesel returns this value internally. We have no way of calling the
@@ -108,7 +108,7 @@ where
     }
 }
 
-#[tracing::instrument(skip_all)]
+#[cfg(feature = "use_has_broken_as_valid_check")]
 fn closure_for_is_valid_of_manager<T>(
     m: &r2d2::ConnectionManager<T>,
     conn: Connection<T>,
@@ -126,3 +126,14 @@ where
     Ok(())
 }
 
+#[cfg(not(feature = "use_has_broken_as_valid_check"))]
+fn closure_for_is_valid_of_manager<T>(
+    m: &r2d2::ConnectionManager<T>,
+    conn: Connection<T>,
+) -> Result<(), ConnectionError>
+where
+    T: R2D2Connection + Send + 'static,
+{
+    m.is_valid(&mut *conn.inner())?;
+    Ok(())
+}
