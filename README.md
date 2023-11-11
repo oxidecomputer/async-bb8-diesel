@@ -9,14 +9,13 @@ which operates on an async-compatible connection. When called
 from an async context, these operations transfer the query
 to a blocking tokio thread, where it may be executed.
 
+NOTE: This crate pre-dated [diesel-async](https://docs.rs/diesel-async/).
+For new code, consider using that interface directly.
+
 # Pre-requisites
 
-- The yet-to-be-released Diesel 2.0. Although not strictly a requirement, the
-  core functionality of this crates relies on an ability to transfer queries
-  from an async task to a blocking thread. This frequently requires the "Send"
-  trait, which is only partially implemented for statements in Diesel 1.x.
-- A willingness to tolerate some instability. This crate is effectively a
-  stop-gap until more native asynchronous support exists within Diesel.
+- A willingness to tolerate some instability. This crate effectively originated
+  as a stop-gap until more native asynchronous support existed within Diesel.
 
 # Comparisons with existing crates
 
