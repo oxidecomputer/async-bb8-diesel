@@ -141,7 +141,7 @@ where
             &conn,
         )) {
             TransactionManagerStatus::Valid(status) => {
-                if status.in_transaction.is_some() {
+                if status.transaction_depth().is_some() {
                     return Err(DieselError::AlreadyInTransaction);
                 }
             }
