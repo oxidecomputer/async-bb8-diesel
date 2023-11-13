@@ -40,7 +40,7 @@ impl<T> OptionalExtension<T> for Result<T, ConnectionError> {
 
         self_as_query_result
             .optional()
-            .map_err(|e| ConnectionError::Query(e))
+            .map_err(ConnectionError::Query)
     }
 }
 
