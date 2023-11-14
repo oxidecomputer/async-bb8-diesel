@@ -164,8 +164,10 @@ async fn test_transaction_automatic_retry_success_case() {
     use user::dsl;
 
     // Transaction that can retry but does not need to.
+    assert_eq!(conn.transaction_depth().await.unwrap(), 0);
     conn.transaction_async_with_retry(
         |conn| async move {
+            assert!(conn.transaction_depth().await.unwrap() > 0);
             diesel::insert_into(dsl::user)
                 .values((dsl::id.eq(3), dsl::name.eq("Sally")))
                 .execute_async(&conn)
@@ -176,6 +178,7 @@ async fn test_transaction_automatic_retry_success_case() {
     )
     .await
     .expect("Transaction failed");
+    assert_eq!(conn.transaction_depth().await.unwrap(), 0);
 
     test_end(crdb).await;
 }
@@ -197,6 +200,7 @@ async fn test_transaction_automatic_retry_explicit_rollback() {
     //
     // 1. Retries on the first call
     // 2. Explicitly rolls back on the second call
+    assert_eq!(conn.transaction_depth().await.unwrap(), 0);
     let err = conn
         .transaction_async_with_retry(
             |_conn| {
@@ -225,6 +229,7 @@ async fn test_transaction_automatic_retry_explicit_rollback() {
         .expect_err("Transaction should have failed");
 
     assert_eq!(err, diesel::result::Error::RollbackTransaction);
+    assert_eq!(conn.transaction_depth().await.unwrap(), 0);
 
     // The transaction closure should have been attempted twice, but
     // we should have only asked whether or not to retry once -- after
@@ -259,6 +264,7 @@ async fn test_transaction_automatic_retry_injected_errors() {
     conn.batch_execute_async("SET inject_retry_errors_enabled = true")
         .await
         .expect("Failed to inject error");
+    assert_eq!(conn.transaction_depth().await.unwrap(), 0);
     conn.transaction_async_with_retry(
         |conn| {
             let transaction_attempted_count = transaction_attempted_count.clone();
@@ -280,6 +286,7 @@ async fn test_transaction_automatic_retry_injected_errors() {
     )
     .await
     .expect("Transaction should have succeeded");
+    assert_eq!(conn.transaction_depth().await.unwrap(), 0);
 
     // The transaction closure should have been attempted twice, but
     // we should have only asked whether or not to retry once -- after
@@ -307,6 +314,7 @@ async fn test_transaction_automatic_retry_does_not_retry_non_retryable_errors() 
     // Test a transaction that:
     //
     // Fails with a non-retryable error. It should exit immediately.
+    assert_eq!(conn.transaction_depth().await.unwrap(), 0);
     assert_eq!(
         conn.transaction_async_with_retry(
             |_| async { Err::<(), _>(diesel::result::Error::NotFound) },
@@ -316,6 +324,7 @@ async fn test_transaction_automatic_retry_does_not_retry_non_retryable_errors() 
         .expect_err("Transaction should have failed"),
         diesel::result::Error::NotFound,
     );
+    assert_eq!(conn.transaction_depth().await.unwrap(), 0);
 
     test_end(crdb).await;
 }
@@ -329,6 +338,7 @@ async fn test_transaction_automatic_retry_nested_transactions_fail() {
     let conn = pool.get().await.unwrap();
 
     // This outer transaction should succeed immediately...
+    assert_eq!(conn.transaction_depth().await.unwrap(), 0);
     conn.transaction_async_with_retry(
         |conn| async move {
             // ... but this inner transaction should fail! We do not support
@@ -351,6 +361,7 @@ async fn test_transaction_automatic_retry_nested_transactions_fail() {
     )
     .await
     .expect("Transaction should have succeeded");
+    assert_eq!(conn.transaction_depth().await.unwrap(), 0);
 
     test_end(crdb).await;
 }

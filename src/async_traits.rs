@@ -12,7 +12,6 @@ use diesel::{
         methods::{ExecuteDsl, LimitDsl, LoadQuery},
         RunQueryDsl,
     },
-    result::DatabaseErrorKind,
     result::Error as DieselError,
 };
 use std::future::Future;
@@ -29,10 +28,11 @@ where
     async fn batch_execute_async(&self, query: &str) -> Result<(), DieselError>;
 }
 
+#[cfg(feature = "cockroach")]
 fn retryable_error(err: &DieselError) -> bool {
     match err {
         DieselError::DatabaseError(kind, boxed_error_information) => match kind {
-            DatabaseErrorKind::SerializationFailure => {
+            diesel::result::DatabaseErrorKind::SerializationFailure => {
                 return boxed_error_information
                     .message()
                     .starts_with("restart transaction");
@@ -48,16 +48,14 @@ fn retryable_error(err: &DieselError) -> bool {
 pub trait AsyncConnection<Conn>: AsyncSimpleConnection<Conn>
 where
     Conn: 'static + DieselConnection,
-    Self: Send,
+    Self: Send + Sized + 'static,
 {
-    type OwnedConnection: Sync + Send + 'static;
-
     #[doc(hidden)]
-    fn get_owned_connection(&self) -> Self::OwnedConnection;
+    fn get_owned_connection(&self) -> Self;
     #[doc(hidden)]
-    fn as_sync_conn(owned: &Self::OwnedConnection) -> MutexGuard<'_, Conn>;
+    fn as_sync_conn(&self) -> MutexGuard<'_, Conn>;
     #[doc(hidden)]
-    fn as_async_conn(owned: &Self::OwnedConnection) -> &SingleConnection<Conn>;
+    fn as_async_conn(&self) -> &SingleConnection<Conn>;
 
     /// Runs the function `f` in an context where blocking is safe.
     async fn run<R, E, Func>(&self, f: Func) -> Result<R, E>
@@ -67,41 +65,36 @@ where
         Func: FnOnce(&mut Conn) -> Result<R, E> + Send + 'static,
     {
         let connection = self.get_owned_connection();
-        Self::run_with_connection(connection, f).await
+        connection.run_with_connection(f).await
     }
 
     #[doc(hidden)]
-    async fn run_with_connection<R, E, Func>(
-        connection: Self::OwnedConnection,
-        f: Func,
-    ) -> Result<R, E>
+    async fn run_with_connection<R, E, Func>(self, f: Func) -> Result<R, E>
     where
         R: Send + 'static,
         E: Send + 'static,
         Func: FnOnce(&mut Conn) -> Result<R, E> + Send + 'static,
     {
-        spawn_blocking(move || f(&mut *Self::as_sync_conn(&connection)))
+        spawn_blocking(move || f(&mut *self.as_sync_conn()))
             .await
             .unwrap() // Propagate panics
     }
 
     #[doc(hidden)]
-    async fn run_with_shared_connection<R, E, Func>(
-        connection: Arc<Self::OwnedConnection>,
-        f: Func,
-    ) -> Result<R, E>
+    async fn run_with_shared_connection<R, E, Func>(self: &Arc<Self>, f: Func) -> Result<R, E>
     where
         R: Send + 'static,
         E: Send + 'static,
         Func: FnOnce(&mut Conn) -> Result<R, E> + Send + 'static,
     {
-        spawn_blocking(move || f(&mut *Self::as_sync_conn(&connection)))
+        let conn = self.clone();
+        spawn_blocking(move || f(&mut *conn.as_sync_conn()))
             .await
             .unwrap() // Propagate panics
     }
 
     #[doc(hidden)]
-    async fn transaction_depth2(&self) -> Result<u32, DieselError> {
+    async fn transaction_depth(&self) -> Result<u32, DieselError> {
         let conn = self.get_owned_connection();
 
         Self::run_with_connection(conn, |conn| {
@@ -118,60 +111,38 @@ where
     }
 
     #[doc(hidden)]
-    fn transaction_depth(conn: &Self::OwnedConnection) -> Result<u32, DieselError> {
-        // Verifying pre-requisites: Ensure we aren't already running
-        // in a "broken" transaction state, nor in a nested transation.
-        match Conn::TransactionManager::transaction_manager_status_mut(&mut *Self::as_sync_conn(
-            &conn,
-        )) {
-            TransactionManagerStatus::Valid(status) => {
-                return Ok(status.transaction_depth().map(|d| d.into()).unwrap_or(0));
-            }
-            TransactionManagerStatus::InError => {
-                return Err(DieselError::BrokenTransactionManager);
-            }
-        }
-    }
-
-    #[doc(hidden)]
-    async fn start_transaction(conn: &Arc<Self::OwnedConnection>) -> Result<(), DieselError> {
-        if Self::transaction_depth(conn)? != 0 {
+    async fn start_transaction(self: &Arc<Self>) -> Result<(), DieselError> {
+        if self.transaction_depth().await? != 0 {
             return Err(DieselError::AlreadyInTransaction);
         }
-        Self::run_with_shared_connection(conn.clone(), |conn| {
-            Conn::TransactionManager::begin_transaction(conn)
-        })
-        .await?;
+        self.run_with_shared_connection(|conn| Conn::TransactionManager::begin_transaction(conn))
+            .await?;
         Ok(())
     }
 
     #[doc(hidden)]
-    async fn add_retry_savepoint(conn: &Arc<Self::OwnedConnection>) -> Result<(), DieselError> {
-        match Self::transaction_depth(conn)? {
+    async fn add_retry_savepoint(self: &Arc<Self>) -> Result<(), DieselError> {
+        match self.transaction_depth().await? {
             0 => return Err(DieselError::NotInTransaction),
             1 => (),
             _ => return Err(DieselError::AlreadyInTransaction),
         };
 
-        Self::run_with_shared_connection(conn.clone(), |conn| {
-            Conn::TransactionManager::begin_transaction(conn)
-        })
-        .await?;
+        self.run_with_shared_connection(|conn| Conn::TransactionManager::begin_transaction(conn))
+            .await?;
         Ok(())
     }
 
     #[doc(hidden)]
-    async fn commit_transaction(conn: &Arc<Self::OwnedConnection>) -> Result<(), DieselError> {
-        Self::run_with_shared_connection(conn.clone(), |conn| {
-            Conn::TransactionManager::commit_transaction(conn)
-        })
-        .await?;
+    async fn commit_transaction(self: &Arc<Self>) -> Result<(), DieselError> {
+        self.run_with_shared_connection(|conn| Conn::TransactionManager::commit_transaction(conn))
+            .await?;
         Ok(())
     }
 
     #[doc(hidden)]
-    async fn rollback_transaction(conn: &Arc<Self::OwnedConnection>) -> Result<(), DieselError> {
-        Self::run_with_shared_connection(conn.clone(), |conn| {
+    async fn rollback_transaction(self: &Arc<Self>) -> Result<(), DieselError> {
+        self.run_with_shared_connection(|conn| {
             Conn::TransactionManager::rollback_transaction(conn)
         })
         .await?;
@@ -181,6 +152,7 @@ where
     /// Issues a function `f` as a transaction.
     ///
     /// If it fails, asynchronously calls `retry` to decide if to retry.
+    #[cfg(feature = "cockroach")]
     async fn transaction_async_with_retry<R, Func, Fut, RetryFut, RetryFunc, 'a>(
         &'a self,
         f: Func,
@@ -206,7 +178,7 @@ where
         // that'll require more interaction with how sessions with the database
         // are constructed.
         Self::start_transaction(&conn).await?;
-        Self::run_with_shared_connection(conn.clone(), |conn| {
+        conn.run_with_shared_connection(|conn| {
             conn.batch_execute("SET LOCAL force_savepoint_restart = true")
         })
         .await?;
@@ -277,7 +249,7 @@ where
         //
         // However, it modifies all callsites to instead issue
         // known-to-be-synchronous operations from an asynchronous context.
-        Self::run_with_shared_connection(conn.clone(), |conn| {
+        conn.run_with_shared_connection(|conn| {
             Conn::TransactionManager::begin_transaction(conn).map_err(E::from)
         })
         .await?;
@@ -297,17 +269,18 @@ where
         let async_conn = SingleConnection(Self::as_async_conn(&conn).0.clone());
         match f(async_conn).await {
             Ok(value) => {
-                Self::run_with_shared_connection(conn.clone(), |conn| {
+                conn.run_with_shared_connection(|conn| {
                     Conn::TransactionManager::commit_transaction(conn).map_err(E::from)
                 })
                 .await?;
                 Ok(value)
             }
             Err(user_error) => {
-                match Self::run_with_shared_connection(conn.clone(), |conn| {
-                    Conn::TransactionManager::rollback_transaction(conn).map_err(E::from)
-                })
-                .await
+                match conn
+                    .run_with_shared_connection(|conn| {
+                        Conn::TransactionManager::rollback_transaction(conn).map_err(E::from)
+                    })
+                    .await
                 {
                     Ok(()) => Err(user_error),
                     Err(err) => Err(err),

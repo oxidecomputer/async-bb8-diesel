@@ -50,20 +50,19 @@ where
     Conn: 'static + R2D2Connection,
     Connection<Conn>: crate::AsyncSimpleConnection<Conn>,
 {
-    type OwnedConnection = Self;
-
-    fn get_owned_connection(&self) -> Self::OwnedConnection {
+    fn get_owned_connection(&self) -> Self {
         Connection(self.0.clone())
     }
 
     // Accesses the connection synchronously, protected by a mutex.
     //
     // Avoid calling from asynchronous contexts.
-    fn as_sync_conn(owned: &Self::OwnedConnection) -> MutexGuard<'_, Conn> {
-        owned.inner()
+    fn as_sync_conn(&self) -> MutexGuard<'_, Conn> {
+        self.inner()
     }
 
-    fn as_async_conn(owned: &Self::OwnedConnection) -> &Connection<Conn> {
-        owned
+    // TODO: Consider removing me.
+    fn as_async_conn(&self) -> &Connection<Conn> {
+        self
     }
 }
