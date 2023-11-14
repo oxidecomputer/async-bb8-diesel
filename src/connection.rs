@@ -1,7 +1,5 @@
 //! An async wrapper around a [`diesel::Connection`].
 
-use crate::async_traits::PostgresConn;
-
 use async_trait::async_trait;
 use diesel::r2d2::R2D2Connection;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -49,15 +47,18 @@ where
 #[async_trait]
 impl<Conn> crate::AsyncConnection<Conn> for Connection<Conn>
 where
-    Conn: 'static + R2D2Connection + PostgresConn,
+    Conn: 'static + R2D2Connection,
     Connection<Conn>: crate::AsyncSimpleConnection<Conn>,
 {
-    type OwnedConnection = Connection<Conn>;
+    type OwnedConnection = Self;
 
-    async fn get_owned_connection(&self) -> Self::OwnedConnection {
+    fn get_owned_connection(&self) -> Self::OwnedConnection {
         Connection(self.0.clone())
     }
 
+    // Accesses the connection synchronously, protected by a mutex.
+    //
+    // Avoid calling from asynchronous contexts.
     fn as_sync_conn(owned: &Self::OwnedConnection) -> MutexGuard<'_, Conn> {
         owned.inner()
     }

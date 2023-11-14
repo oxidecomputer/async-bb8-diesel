@@ -29,22 +29,6 @@ where
     async fn batch_execute_async(&self, query: &str) -> Result<(), DieselError>;
 }
 
-// Short-hand for "A Diesel connection that with a specific backend and transaction manager"
-pub trait PostgresConn:
-    DieselConnection<
-    Backend = diesel::pg::Pg,
-    TransactionManager = diesel::connection::AnsiTransactionManager,
->
-{
-}
-impl<T> PostgresConn for T where
-    T: DieselConnection<
-        Backend = diesel::pg::Pg,
-        TransactionManager = diesel::connection::AnsiTransactionManager,
-    >
-{
-}
-
 fn retryable_error(err: &DieselError) -> bool {
     match err {
         DieselError::DatabaseError(kind, boxed_error_information) => match kind {
@@ -63,13 +47,13 @@ fn retryable_error(err: &DieselError) -> bool {
 #[async_trait]
 pub trait AsyncConnection<Conn>: AsyncSimpleConnection<Conn>
 where
-    Conn: 'static + PostgresConn,
+    Conn: 'static + DieselConnection,
     Self: Send,
 {
     type OwnedConnection: Sync + Send + 'static;
 
     #[doc(hidden)]
-    async fn get_owned_connection(&self) -> Self::OwnedConnection;
+    fn get_owned_connection(&self) -> Self::OwnedConnection;
     #[doc(hidden)]
     fn as_sync_conn(owned: &Self::OwnedConnection) -> MutexGuard<'_, Conn>;
     #[doc(hidden)]
@@ -82,7 +66,7 @@ where
         E: Send + 'static,
         Func: FnOnce(&mut Conn) -> Result<R, E> + Send + 'static,
     {
-        let connection = self.get_owned_connection().await;
+        let connection = self.get_owned_connection();
         Self::run_with_connection(connection, f).await
     }
 
@@ -116,6 +100,84 @@ where
             .unwrap() // Propagate panics
     }
 
+    #[doc(hidden)]
+    async fn transaction_depth2(&self) -> Result<u32, DieselError> {
+        let conn = self.get_owned_connection();
+
+        Self::run_with_connection(conn, |conn| {
+            match Conn::TransactionManager::transaction_manager_status_mut(&mut *conn) {
+                TransactionManagerStatus::Valid(status) => {
+                    return Ok(status.transaction_depth().map(|d| d.into()).unwrap_or(0));
+                }
+                TransactionManagerStatus::InError => {
+                    return Err(DieselError::BrokenTransactionManager);
+                }
+            }
+        })
+        .await
+    }
+
+    #[doc(hidden)]
+    fn transaction_depth(conn: &Self::OwnedConnection) -> Result<u32, DieselError> {
+        // Verifying pre-requisites: Ensure we aren't already running
+        // in a "broken" transaction state, nor in a nested transation.
+        match Conn::TransactionManager::transaction_manager_status_mut(&mut *Self::as_sync_conn(
+            &conn,
+        )) {
+            TransactionManagerStatus::Valid(status) => {
+                return Ok(status.transaction_depth().map(|d| d.into()).unwrap_or(0));
+            }
+            TransactionManagerStatus::InError => {
+                return Err(DieselError::BrokenTransactionManager);
+            }
+        }
+    }
+
+    #[doc(hidden)]
+    async fn start_transaction(conn: &Arc<Self::OwnedConnection>) -> Result<(), DieselError> {
+        if Self::transaction_depth(conn)? != 0 {
+            return Err(DieselError::AlreadyInTransaction);
+        }
+        Self::run_with_shared_connection(conn.clone(), |conn| {
+            Conn::TransactionManager::begin_transaction(conn)
+        })
+        .await?;
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    async fn add_retry_savepoint(conn: &Arc<Self::OwnedConnection>) -> Result<(), DieselError> {
+        match Self::transaction_depth(conn)? {
+            0 => return Err(DieselError::NotInTransaction),
+            1 => (),
+            _ => return Err(DieselError::AlreadyInTransaction),
+        };
+
+        Self::run_with_shared_connection(conn.clone(), |conn| {
+            Conn::TransactionManager::begin_transaction(conn)
+        })
+        .await?;
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    async fn commit_transaction(conn: &Arc<Self::OwnedConnection>) -> Result<(), DieselError> {
+        Self::run_with_shared_connection(conn.clone(), |conn| {
+            Conn::TransactionManager::commit_transaction(conn)
+        })
+        .await?;
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    async fn rollback_transaction(conn: &Arc<Self::OwnedConnection>) -> Result<(), DieselError> {
+        Self::run_with_shared_connection(conn.clone(), |conn| {
+            Conn::TransactionManager::rollback_transaction(conn)
+        })
+        .await?;
+        Ok(())
+    }
+
     /// Issues a function `f` as a transaction.
     ///
     /// If it fails, asynchronously calls `retry` to decide if to retry.
@@ -133,108 +195,64 @@ where
     {
         // Check out a connection once, and use it for the duration of the
         // operation.
-        let conn = self.get_owned_connection().await;
+        let conn = Arc::new(self.get_owned_connection());
 
-        // Verifying pre-requisites: Ensure we aren't already running
-        // in a "broken" transaction state, nor in a nested transation.
-        match Conn::TransactionManager::transaction_manager_status_mut(&mut *Self::as_sync_conn(
-            &conn,
-        )) {
-            TransactionManagerStatus::Valid(status) => {
-                if status.transaction_depth().is_some() {
-                    return Err(DieselError::AlreadyInTransaction);
-                }
-            }
-            TransactionManagerStatus::InError => {
-                return Err(DieselError::BrokenTransactionManager);
-            }
-        }
-        let conn = Arc::new(conn);
-
-        // This function mimics the implementation of:
-        // https://docs.diesel.rs/master/diesel/connection/trait.TransactionManager.html#method.transaction
+        // Refer to CockroachDB's guide on advanced client-side transaction
+        // retries for the full context here. In short, they expect a particular
+        // name for this savepoint, but Diesel has Opinions on savepoint names,
+        // so we use this session variable to identify that any name is valid.
         //
-        // However, it modifies all callsites to instead issue
-        // known-to-be-synchronous operations from an asynchronous context.
+        // TODO: It may be preferable to set this once per connection -- but
+        // that'll require more interaction with how sessions with the database
+        // are constructed.
+        Self::start_transaction(&conn).await?;
         Self::run_with_shared_connection(conn.clone(), |conn| {
-            // BEGIN
-            Conn::TransactionManager::begin_transaction(conn)?;
-            // SAVEPOINT diesel_savepoint_1
-            Conn::TransactionManager::begin_transaction(conn)
+            conn.batch_execute("SET LOCAL force_savepoint_restart = true")
         })
         .await?;
 
-        // TODO: The outer-most diesel savepoint is called "diesel_savepoint_1"
-        // TODO: Set the CRDB Session variable accordingly?
-        //
-        // - https://www.cockroachlabs.com/docs/v23.1/set-vars#supported-variables
-        // - "force_savepoint_restart"
-        // - "inject_retry_errors_enabled" for testing
-
         loop {
+            // Add a SAVEPOINT to which we can later return.
+            Self::add_retry_savepoint(&conn).await?;
+
             let async_conn = SingleConnection(Self::as_async_conn(&conn).0.clone());
             match f(async_conn).await {
                 Ok(value) => {
-                    if let Err(err) = Self::run_with_shared_connection(conn.clone(), |conn| {
-                        // RELEASE SAVEPOINT diesel_savepoint_1.
-                        //   If this fails, diesel automatically attempts to
-                        //   rollback. If ROLLBACK fails, we get a non-retryable
-                        //   error.
-                        Conn::TransactionManager::commit_transaction(conn)
-                    })
-                    .await
-                    {
-                        // Here, we're still in the transation, but we at least
+                    // The user-level operation succeeded: try to commit the
+                    // transaction by RELEASE-ing the retry savepoint.
+                    if let Err(err) = Self::commit_transaction(&conn).await {
+                        // We're still in the transation, but we at least
                         // tried to ROLLBACK to our savepoint.
                         if !retryable_error(&err) || !retry().await {
-                            // Try to ROLLBACK the initial BEGIN statement too.
-                            let _ = Self::run_with_shared_connection(conn.clone(), |conn| {
-                                Conn::TransactionManager::rollback_transaction(conn)
-                            })
-                            .await;
+                            // Bail: ROLLBACK the initial BEGIN statement too.
+                            let _ = Self::rollback_transaction(&conn).await;
                             return Err(err);
                         }
-
-                        // If we're here: ROLLBACK happened, we want to retry.
+                        // ROLLBACK happened, we want to retry.
                         continue;
                     }
 
-                    // COMMIT
-                    Self::run_with_shared_connection(conn.clone(), |conn| {
-                        Conn::TransactionManager::commit_transaction(conn)
-                    })
-                    .await?;
-
+                    Self::commit_transaction(&conn).await?;
                     return Ok(value);
                 }
                 Err(user_error) => {
-                    // If the user-level operations failed, we haven't tried
-                    // rolling back at all.
-                    //
-                    // First: ROLLBACK to the savepoint.
-                    match Self::run_with_shared_connection(conn.clone(), |conn| {
-                        Conn::TransactionManager::rollback_transaction(conn)
-                    })
-                    .await
-                    {
-                        // If ROLLBACK worked and we are supposed to retry,
-                        // restart the transaction.
-                        Ok(()) => {
-                            if !retryable_error(&user_error) || !retry().await {
-                                continue;
-                            }
-                        }
-                        // If ROLLBACK failed, ignore the error. Just unwind the
-                        // whole operation.
-                        Err(_err) => (),
+                    // The user-level operation failed: ROLLBACK.
+                    if let Err(err) = Self::rollback_transaction(&conn).await {
+                        // If we fail while rolling back, prioritize returning
+                        // the ROLLBACK error over the user errors.
+                        return match Self::rollback_transaction(&conn).await {
+                            Ok(()) => Err(err),
+                            Err(err) => Err(err),
+                        };
+                    }
+
+                    // ROLLBACK happened, we want to retry.
+                    if retryable_error(&user_error) && retry().await {
+                        continue;
                     }
 
                     // If we aren't retrying, ROLLBACK the BEGIN statement too.
-                    return match Self::run_with_shared_connection(conn.clone(), |conn| {
-                        Conn::TransactionManager::rollback_transaction(conn)
-                    })
-                    .await
-                    {
+                    return match Self::rollback_transaction(&conn).await {
                         Ok(()) => Err(user_error),
                         Err(err) => Err(err),
                     };
@@ -252,7 +270,7 @@ where
     {
         // Check out a connection once, and use it for the duration of the
         // operation.
-        let conn = Arc::new(self.get_owned_connection().await);
+        let conn = Arc::new(self.get_owned_connection());
 
         // This function mimics the implementation of:
         // https://docs.diesel.rs/master/diesel/connection/trait.TransactionManager.html#method.transaction
@@ -303,7 +321,7 @@ where
 #[async_trait]
 pub trait AsyncRunQueryDsl<Conn, AsyncConn>
 where
-    Conn: 'static + PostgresConn,
+    Conn: 'static + DieselConnection,
 {
     async fn execute_async(self, asc: &AsyncConn) -> Result<usize, DieselError>
     where
@@ -335,7 +353,7 @@ where
 impl<T, AsyncConn, Conn> AsyncRunQueryDsl<Conn, AsyncConn> for T
 where
     T: 'static + Send + RunQueryDsl<Conn>,
-    Conn: 'static + PostgresConn,
+    Conn: 'static + DieselConnection,
     AsyncConn: Send + Sync + AsyncConnection<Conn>,
 {
     async fn execute_async(self, asc: &AsyncConn) -> Result<usize, DieselError>
@@ -382,7 +400,7 @@ where
 #[async_trait]
 pub trait AsyncSaveChangesDsl<Conn, AsyncConn>
 where
-    Conn: 'static + PostgresConn,
+    Conn: 'static + DieselConnection,
 {
     async fn save_changes_async<Output>(self, asc: &AsyncConn) -> Result<Output, DieselError>
     where
@@ -395,7 +413,7 @@ where
 impl<T, AsyncConn, Conn> AsyncSaveChangesDsl<Conn, AsyncConn> for T
 where
     T: 'static + Send + Sync + diesel::SaveChangesDsl<Conn>,
-    Conn: 'static + PostgresConn,
+    Conn: 'static + DieselConnection,
     AsyncConn: Send + Sync + AsyncConnection<Conn>,
 {
     async fn save_changes_async<Output>(self, asc: &AsyncConn) -> Result<Output, DieselError>
