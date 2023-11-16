@@ -260,6 +260,9 @@ async fn test_transaction_automatic_retry_injected_errors() {
     // exception of SET statements) will return a transaction retry error."
     // - "after the 3rd retry error, the transaction will proceed as
     // normal"
+    //
+    // See: https://www.cockroachlabs.com/docs/v23.1/transaction-retry-error-example#test-transaction-retry-logic
+    // for more details
     const EXPECTED_ERR_COUNT: usize = 3;
     conn.batch_execute_async("SET inject_retry_errors_enabled = true")
         .await
@@ -337,30 +340,41 @@ async fn test_transaction_automatic_retry_nested_transactions_fail() {
     let pool = bb8::Pool::builder().build(manager).await.unwrap();
     let conn = pool.get().await.unwrap();
 
+    #[derive(Debug, PartialEq)]
+    struct OnlyReturnFromOuterTransaction {}
+
     // This outer transaction should succeed immediately...
     assert_eq!(conn.transaction_depth().await.unwrap(), 0);
-    conn.transaction_async_with_retry(
-        |conn| async move {
-            // ... but this inner transaction should fail! We do not support
-            // retryable nested transactions.
-            let err = conn
-                .transaction_async_with_retry(
-                    |_| async {
-                        panic!("Shouldn't run");
-                        #[allow(unreachable_code)]
-                        Ok(())
-                    },
-                    || async { panic!("Shouldn't retry inner transaction") },
-                )
-                .await
-                .expect_err("Nested transaction should have failed");
-            assert_eq!(err, diesel::result::Error::AlreadyInTransaction);
-            Ok(())
-        },
-        || async { panic!("Shouldn't retry outer transaction") },
-    )
-    .await
-    .expect("Transaction should have succeeded");
+    assert_eq!(
+        OnlyReturnFromOuterTransaction {},
+        conn.transaction_async_with_retry(
+            |conn| async move {
+                // ... but this inner transaction should fail! We do not support
+                // retryable nested transactions.
+                let err = conn
+                    .transaction_async_with_retry(
+                        |_| async {
+                            panic!("Shouldn't run");
+
+                            // Adding this unreachable statement for type inference
+                            #[allow(unreachable_code)]
+                            Ok(())
+                        },
+                        || async { panic!("Shouldn't retry inner transaction") },
+                    )
+                    .await
+                    .expect_err("Nested transaction should have failed");
+                assert_eq!(err, diesel::result::Error::AlreadyInTransaction);
+
+                // We still want to show that control exists within the outer
+                // transaction, so we explicitly return here.
+                Ok(OnlyReturnFromOuterTransaction {})
+            },
+            || async { panic!("Shouldn't retry outer transaction") },
+        )
+        .await
+        .expect("Transaction should have succeeded")
+    );
     assert_eq!(conn.transaction_depth().await.unwrap(), 0);
 
     test_end(crdb).await;

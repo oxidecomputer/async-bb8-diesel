@@ -30,15 +30,13 @@ where
 
 #[cfg(feature = "cockroach")]
 fn retryable_error(err: &DieselError) -> bool {
+    use diesel::result::DatabaseErrorKind::SerializationFailure;
     match err {
-        DieselError::DatabaseError(kind, boxed_error_information) => match kind {
-            diesel::result::DatabaseErrorKind::SerializationFailure => {
-                return boxed_error_information
-                    .message()
-                    .starts_with("restart transaction");
-            }
-            _ => false,
-        },
+        DieselError::DatabaseError(SerializationFailure, boxed_error_information) => {
+            return boxed_error_information
+                .message()
+                .starts_with("restart transaction");
+        }
         _ => false,
     }
 }
@@ -100,16 +98,19 @@ where
         Self::run_with_connection(conn, |conn| {
             match Conn::TransactionManager::transaction_manager_status_mut(&mut *conn) {
                 TransactionManagerStatus::Valid(status) => {
-                    return Ok(status.transaction_depth().map(|d| d.into()).unwrap_or(0));
+                    Ok(status.transaction_depth().map(|d| d.into()).unwrap_or(0))
                 }
-                TransactionManagerStatus::InError => {
-                    return Err(DieselError::BrokenTransactionManager);
-                }
+                TransactionManagerStatus::InError => Err(DieselError::BrokenTransactionManager),
             }
         })
         .await
     }
 
+    // Diesel's "begin_transaction" chooses whether to issue "BEGIN" or a
+    // "SAVEPOINT" depending on the transaction depth.
+    //
+    // This method is a wrapper around that call, with validation that
+    // we're actually issuing the BEGIN statement here.
     #[doc(hidden)]
     async fn start_transaction(self: &Arc<Self>) -> Result<(), DieselError> {
         if self.transaction_depth().await? != 0 {
@@ -120,6 +121,11 @@ where
         Ok(())
     }
 
+    // Diesel's "begin_transaction" chooses whether to issue "BEGIN" or a
+    // "SAVEPOINT" depending on the transaction depth.
+    //
+    // This method is a wrapper around that call, with validation that
+    // we're actually issuing our first SAVEPOINT here.
     #[doc(hidden)]
     async fn add_retry_savepoint(self: &Arc<Self>) -> Result<(), DieselError> {
         match self.transaction_depth().await? {
@@ -193,7 +199,7 @@ where
                     // The user-level operation succeeded: try to commit the
                     // transaction by RELEASE-ing the retry savepoint.
                     if let Err(err) = Self::commit_transaction(&conn).await {
-                        // We're still in the transation, but we at least
+                        // We're still in the transaction, but we at least
                         // tried to ROLLBACK to our savepoint.
                         if !retryable_error(&err) || !retry().await {
                             // Bail: ROLLBACK the initial BEGIN statement too.
@@ -209,12 +215,12 @@ where
                 }
                 Err(user_error) => {
                     // The user-level operation failed: ROLLBACK.
-                    if let Err(err) = Self::rollback_transaction(&conn).await {
+                    if let Err(first_rollback_err) = Self::rollback_transaction(&conn).await {
                         // If we fail while rolling back, prioritize returning
                         // the ROLLBACK error over the user errors.
                         return match Self::rollback_transaction(&conn).await {
-                            Ok(()) => Err(err),
-                            Err(err) => Err(err),
+                            Ok(()) => Err(first_rollback_err),
+                            Err(second_rollback_err) => Err(second_rollback_err),
                         };
                     }
 
