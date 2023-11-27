@@ -32,11 +32,7 @@ where
 fn retryable_error(err: &DieselError) -> bool {
     use diesel::result::DatabaseErrorKind::SerializationFailure;
     match err {
-        DieselError::DatabaseError(SerializationFailure, boxed_error_information) => {
-            return boxed_error_information
-                .message()
-                .starts_with("restart transaction");
-        }
+        DieselError::DatabaseError(SerializationFailure, _boxed_error_information) => true,
         _ => false,
     }
 }
@@ -158,6 +154,9 @@ where
     /// Issues a function `f` as a transaction.
     ///
     /// If it fails, asynchronously calls `retry` to decide if to retry.
+    ///
+    /// This function throws an error if it is called from within an existing
+    /// transaction.
     #[cfg(feature = "cockroach")]
     async fn transaction_async_with_retry<R, Func, Fut, RetryFut, RetryFunc, 'a>(
         &'a self,
@@ -176,9 +175,12 @@ where
         let conn = Arc::new(self.get_owned_connection());
 
         // Refer to CockroachDB's guide on advanced client-side transaction
-        // retries for the full context here. In short, they expect a particular
-        // name for this savepoint, but Diesel has Opinions on savepoint names,
-        // so we use this session variable to identify that any name is valid.
+        // retries for the full context:
+        // https://www.cockroachlabs.com/docs/v23.1/advanced-client-side-transaction-retries
+        //
+        // In short, they expect a particular name for this savepoint, but
+        // Diesel has Opinions on savepoint names, so we use this session
+        // variable to identify that any name is valid.
         //
         // TODO: It may be preferable to set this once per connection -- but
         // that'll require more interaction with how sessions with the database
@@ -199,6 +201,9 @@ where
                     // The user-level operation succeeded: try to commit the
                     // transaction by RELEASE-ing the retry savepoint.
                     if let Err(err) = Self::commit_transaction(&conn).await {
+                        // Diesel's implementation of "commit_transaction"
+                        // calls "rollback_transaction" in the error path.
+                        //
                         // We're still in the transaction, but we at least
                         // tried to ROLLBACK to our savepoint.
                         if !retryable_error(&err) || !retry().await {
@@ -210,11 +215,13 @@ where
                         continue;
                     }
 
+                    // Commit the top-level transaction too.
                     Self::commit_transaction(&conn).await?;
                     return Ok(value);
                 }
                 Err(user_error) => {
-                    // The user-level operation failed: ROLLBACK.
+                    // The user-level operation failed: ROLLBACK to the retry
+                    // savepoint.
                     if let Err(first_rollback_err) = Self::rollback_transaction(&conn).await {
                         // If we fail while rolling back, prioritize returning
                         // the ROLLBACK error over the user errors.
@@ -224,7 +231,8 @@ where
                         };
                     }
 
-                    // ROLLBACK happened, we want to retry.
+                    // We rolled back to the retry savepoint, and now want to
+                    // retry.
                     if retryable_error(&user_error) && retry().await {
                         continue;
                     }
