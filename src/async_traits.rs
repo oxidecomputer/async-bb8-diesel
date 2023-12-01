@@ -131,7 +131,7 @@ where
                 .await
                 {
                     Ok(()) => Err(user_error),
-                    Err(err) => Err(err.into()),
+                    Err(err) => Err(err),
                 }
             }
         }
