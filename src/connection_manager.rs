@@ -57,6 +57,17 @@ impl<T: Send + 'static> ConnectionManager<T> {
             // Intentionally panic if the inner closure panics.
             .unwrap()
     }
+
+    #[cfg(feature = "use_has_broken_as_valid_check")]
+    fn run<R, F>(&self, f: F) -> R
+    where
+        R: Send + 'static,
+        F: Send + 'static + FnOnce(&r2d2::ConnectionManager<T>) -> R,
+    {
+        let cloned = self.inner.clone();
+        let cloned = cloned.lock().unwrap();
+        f(&*cloned)
+    }
 }
 
 #[async_trait]
@@ -76,11 +87,17 @@ where
 
     async fn is_valid(&self, conn: &mut Self::Connection) -> Result<(), Self::Error> {
         let c = Connection(conn.0.clone());
-        self.run_blocking(move |m| {
-            m.is_valid(&mut *c.inner())?;
-            Ok(())
-        })
-        .await
+
+        #[cfg(not(feature = "use_has_broken_as_valid_check"))]
+        {
+            self.run_blocking(move |m| closure_for_is_valid_of_manager(m, c))
+                .await
+        }
+
+        #[cfg(feature = "use_has_broken_as_valid_check")]
+        {
+            self.run(move |m| closure_for_is_valid_of_manager(m, c))
+        }
     }
 
     fn has_broken(&self, _: &mut Self::Connection) -> bool {
@@ -89,4 +106,34 @@ where
         // indicates that this method is not mandatory.
         false
     }
+}
+
+#[cfg(feature = "use_has_broken_as_valid_check")]
+fn closure_for_is_valid_of_manager<T>(
+    m: &r2d2::ConnectionManager<T>,
+    conn: Connection<T>,
+) -> Result<(), ConnectionError>
+where
+    T: R2D2Connection + Send + 'static,
+{
+    if m.has_broken(&mut *conn.inner()) {
+        return Err(ConnectionError::Connection(
+            diesel::r2d2::Error::ConnectionError(diesel::ConnectionError::BadConnection(
+                "connection brokenn".to_string(),
+            )),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "use_has_broken_as_valid_check"))]
+fn closure_for_is_valid_of_manager<T>(
+    m: &r2d2::ConnectionManager<T>,
+    conn: Connection<T>,
+) -> Result<(), ConnectionError>
+where
+    T: R2D2Connection + Send + 'static,
+{
+    m.is_valid(&mut *conn.inner())?;
+    Ok(())
 }
