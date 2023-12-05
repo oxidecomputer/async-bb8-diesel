@@ -16,6 +16,7 @@ use diesel::{
 };
 use futures::future::BoxFuture;
 use futures::future::FutureExt;
+use std::any::Any;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::MutexGuard;
@@ -166,35 +167,45 @@ where
         retry: RetryFunc,
     ) -> Result<R, DieselError>
     where
-        R: Send + 'static,
+        R: Any + Send + 'static,
         Fut: FutureExt<Output = Result<R, DieselError>> + Send,
         Func: (Fn(SingleConnection<Conn>) -> Fut) + Send + Sync,
         RetryFut: FutureExt<Output = bool> + Send,
         RetryFunc: Fn() -> RetryFut + Send + Sync,
     {
+        // This function sure has a bunch of generic parameters, which can cause
+        // a lot of code to be generated, and can slow down compile-time.
+        //
+        // This API intends to provide a convenient, generic, shim over the
+        // dynamic "transaction_async_with_retry_inner" function below, which
+        // should avoid being generic. The goal here is to instantiate only one
+        // significant "body" of this function, while retaining flexibility for
+        // clients using this library.
+
+        // Box the functions, and box the return value.
         let f = |conn| {
-            f(conn).boxed()
+            f(conn)
+                .map(|result| result.map(|r| Box::new(r) as Box<dyn Any + Send>))
+                .boxed()
         };
+        let retry = || retry().boxed();
 
-        let retry = || {
-            retry().boxed()
-        };
-
-        self.transaction_async_with_retry_inner::<R>(
-            &f,
-            &retry,
-        ).await
+        // Call the dynamically dispatched function, then retrieve the return
+        // value out of a Box.
+        self.transaction_async_with_retry_inner(&f, &retry)
+            .await
+            .map(|v| *v.downcast::<R>().expect("Should be an 'R' type"))
     }
 
+    // NOTE: This function intentionally avoids all generics!
     #[cfg(feature = "cockroach")]
-    async fn transaction_async_with_retry_inner<R>(
+    async fn transaction_async_with_retry_inner(
         &self,
-        f: &(dyn Fn(SingleConnection<Conn>) -> BoxFuture<'_, Result<R, DieselError>> + Send + Sync),
+        f: &(dyn Fn(SingleConnection<Conn>) -> BoxFuture<'_, Result<Box<dyn Any + Send>, DieselError>>
+              + Send
+              + Sync),
         retry: &(dyn Fn() -> BoxFuture<'_, bool> + Send + Sync),
-    ) -> Result<R, DieselError>
-    where
-        R: Send + 'static,
-    {
+    ) -> Result<Box<dyn Any + Send>, DieselError> {
         // Check out a connection once, and use it for the duration of the
         // operation.
         let conn = Arc::new(self.get_owned_connection());
@@ -278,6 +289,38 @@ where
         E: From<DieselError> + Send + 'static,
         Fut: Future<Output = Result<R, E>> + Send,
         Func: FnOnce(SingleConnection<Conn>) -> Fut + Send,
+    {
+        // This function sure has a bunch of generic parameters, which can cause
+        // a lot of code to be generated, and can slow down compile-time.
+        //
+        // This API intends to provide a convenient, generic, shim over the
+        // dynamic "transaction_async_with_retry_inner" function below, which
+        // should avoid being generic. The goal here is to instantiate only one
+        // significant "body" of this function, while retaining flexibility for
+        // clients using this library.
+
+        let f = Box::new(move |conn| {
+            f(conn)
+                .map(|result| result.map(|r| Box::new(r) as Box<dyn Any + Send>))
+                .boxed()
+        });
+
+        self.transaction_async_inner(f)
+            .await
+            .map(|v| *v.downcast::<R>().expect("Should be an 'R' type"))
+    }
+
+    // NOTE: This function intentionally avoids as many generic parameters as possible
+    async fn transaction_async_inner<'a, E>(
+        &'a self,
+        f: Box<
+            dyn FnOnce(SingleConnection<Conn>) -> BoxFuture<'a, Result<Box<dyn Any + Send>, E>>
+                + Send
+                + 'a,
+        >,
+    ) -> Result<Box<dyn Any + Send>, E>
+    where
+        E: From<DieselError> + Send + 'static,
     {
         // Check out a connection once, and use it for the duration of the
         // operation.
