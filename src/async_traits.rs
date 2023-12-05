@@ -14,6 +14,8 @@ use diesel::{
     },
     result::Error as DieselError,
 };
+use futures::future::BoxFuture;
+use futures::future::FutureExt;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::MutexGuard;
@@ -165,10 +167,33 @@ where
     ) -> Result<R, DieselError>
     where
         R: Send + 'static,
-        Fut: Future<Output = Result<R, DieselError>> + Send,
-        Func: Fn(SingleConnection<Conn>) -> Fut + Send + Sync,
-        RetryFut: Future<Output = bool> + Send,
+        Fut: FutureExt<Output = Result<R, DieselError>> + Send,
+        Func: (Fn(SingleConnection<Conn>) -> Fut) + Send + Sync,
+        RetryFut: FutureExt<Output = bool> + Send,
         RetryFunc: Fn() -> RetryFut + Send + Sync,
+    {
+        let f = |conn| {
+            f(conn).boxed()
+        };
+
+        let retry = || {
+            retry().boxed()
+        };
+
+        self.transaction_async_with_retry_inner::<R>(
+            &f,
+            &retry,
+        ).await
+    }
+
+    #[cfg(feature = "cockroach")]
+    async fn transaction_async_with_retry_inner<R>(
+        &self,
+        f: &(dyn Fn(SingleConnection<Conn>) -> BoxFuture<'_, Result<R, DieselError>> + Send + Sync),
+        retry: &(dyn Fn() -> BoxFuture<'_, bool> + Send + Sync),
+    ) -> Result<R, DieselError>
+    where
+        R: Send + 'static,
     {
         // Check out a connection once, and use it for the duration of the
         // operation.
