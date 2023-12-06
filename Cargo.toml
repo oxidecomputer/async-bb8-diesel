@@ -8,6 +8,11 @@ license = "MIT"
 repository = "https://github.com/oxidecomputer/async-bb8-diesel"
 keywords = ["diesel", "r2d2", "pool", "tokio", "async"]
 
+[features]
+# Enables CockroachDB-specific functions.
+cockroach = []
+default = [ "cockroach" ]
+
 [dependencies]
 bb8 = "0.8"
 async-trait = "0.1.73"

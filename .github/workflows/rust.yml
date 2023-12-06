@@ -23,6 +23,14 @@ jobs:
     - name: Check style
       run: cargo fmt -- --check
 
+  check-without-cockroach:
+    runs-on: ubuntu-latest
+    steps:
+    # actions/checkout@v2
+    - uses: actions/checkout@72f2cec99f417b1a1c5e2e88945068983b7965f9
+    - name: Cargo check
+      run: cargo check --no-default-features
+
   build-and-test:
     runs-on: ${{ matrix.os }}
     strategy:
