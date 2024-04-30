@@ -46,6 +46,10 @@ impl<T: Send + 'static> ConnectionManager<T> {
         }
     }
 
+    pub fn update_database_url<S: Into<String>>(&self, database_url: S) {
+        self.inner.lock().unwrap().update_database_url(database_url)
+    }
+
     async fn run_blocking<R, F>(&self, f: F) -> R
     where
         R: Send + 'static,
