@@ -11,7 +11,8 @@ mod connection_manager;
 mod error;
 
 pub use async_traits::{
-    AsyncConnection, AsyncRunQueryDsl, AsyncSaveChangesDsl, AsyncSimpleConnection,
+    AsyncConnection, AsyncR2D2Connection, AsyncRunQueryDsl, AsyncSaveChangesDsl,
+    AsyncSimpleConnection,
 };
 pub use connection::Connection;
 pub use connection_manager::ConnectionManager;

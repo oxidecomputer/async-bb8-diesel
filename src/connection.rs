@@ -61,7 +61,6 @@ where
         self.inner()
     }
 
-    // TODO: Consider removing me.
     fn as_async_conn(&self) -> &Connection<Conn> {
         self
     }
