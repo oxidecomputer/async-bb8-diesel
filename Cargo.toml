@@ -15,16 +15,16 @@ default = [ "cockroach" ]
 
 [dependencies]
 bb8 = "0.8"
-async-trait = "0.1.73"
-diesel = { version = "2.1.0", default-features = false, features = [ "r2d2" ] }
+async-trait = "0.1.80"
+diesel = { version = "2.1.6", default-features = false, features = [ "r2d2" ] }
 futures = "0.3"
 thiserror = "1.0"
 tokio = { version = "1.32", default-features = false, features = [ "rt-multi-thread" ] }
 
 [dev-dependencies]
 anyhow = "1.0"
-diesel = { version = "2.1.0", features = [ "postgres", "r2d2" ] }
-libc = "0.2.150"
+diesel = { version = "2.1.6", features = [ "postgres", "r2d2" ] }
+libc = "0.2.154"
 tempfile = "3.8"
 tokio = { version = "1.32", features = [ "macros", "fs", "process" ] }
 tokio-postgres = { version = "0.7", features = [ "with-chrono-0_4", "with-uuid-1" ] }
