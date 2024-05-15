@@ -45,6 +45,10 @@ where
 }
 
 #[async_trait]
+impl<Conn> crate::AsyncR2D2Connection<Conn> for Connection<Conn> where Conn: 'static + R2D2Connection
+{}
+
+#[async_trait]
 impl<Conn> crate::AsyncConnection<Conn> for Connection<Conn>
 where
     Conn: 'static + R2D2Connection,
