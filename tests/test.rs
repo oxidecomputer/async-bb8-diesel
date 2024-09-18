@@ -5,12 +5,9 @@
 use async_bb8_diesel::{
     AsyncConnection, AsyncRunQueryDsl, AsyncSaveChangesDsl, AsyncSimpleConnection, ConnectionError,
 };
+use crdb_harness::{CockroachInstance, CockroachStarterBuilder};
 use diesel::OptionalExtension;
 use diesel::{pg::PgConnection, prelude::*};
-
-mod harness;
-
-use harness::{CockroachInstance, CockroachStarterBuilder};
 
 table! {
     user (id) {
