@@ -39,10 +39,6 @@ jobs:
     steps:
     # actions/checkout@v2
     - uses: actions/checkout@9a9194f87191a7e9055e3e9b95b8cfb13023bb08
-    - name: Download CockroachDB
-      run: ./tools/ci_download_cockroachdb
-    - name: Add CockroachDB to PATH
-      run: echo ./out/cockroachdb/bin >> $GITHUB_PATH
     - name: Build
       run: cargo build --tests --verbose
     - name: Run tests
