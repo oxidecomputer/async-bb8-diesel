@@ -4,9 +4,9 @@
 
 use async_bb8_diesel::{
     AsyncConnection, AsyncRunQueryDsl, AsyncSaveChangesDsl, AsyncSimpleConnection, ConnectionError,
+    OptionalExtension, RunError,
 };
 use crdb_harness::{CockroachInstance, CockroachStarterBuilder};
-use diesel::OptionalExtension;
 use diesel::{pg::PgConnection, prelude::*};
 
 table! {
@@ -208,13 +208,17 @@ async fn test_transaction_automatic_retry_explicit_rollback() {
 
                     if *count < 2 {
                         eprintln!("test: Manually restarting txn");
-                        return Err::<(), _>(diesel::result::Error::DatabaseError(
-                            diesel::result::DatabaseErrorKind::SerializationFailure,
-                            Box::new("restart transaction".to_string()),
+                        return Err::<(), _>(RunError::DieselError(
+                            diesel::result::Error::DatabaseError(
+                                diesel::result::DatabaseErrorKind::SerializationFailure,
+                                Box::new("restart transaction".to_string()),
+                            ),
                         ));
                     }
                     eprintln!("test: Manually rolling back txn");
-                    return Err(diesel::result::Error::RollbackTransaction);
+                    return Err(RunError::DieselError(
+                        diesel::result::Error::RollbackTransaction,
+                    ));
                 }
             },
             || async {
@@ -225,7 +229,10 @@ async fn test_transaction_automatic_retry_explicit_rollback() {
         .await
         .expect_err("Transaction should have failed");
 
-    assert_eq!(err, diesel::result::Error::RollbackTransaction);
+    assert_eq!(
+        err,
+        RunError::DieselError(diesel::result::Error::RollbackTransaction)
+    );
     assert_eq!(conn.transaction_depth().await.unwrap(), 0);
 
     // The transaction closure should have been attempted twice, but
@@ -317,12 +324,12 @@ async fn test_transaction_automatic_retry_does_not_retry_non_retryable_errors() 
     assert_eq!(conn.transaction_depth().await.unwrap(), 0);
     assert_eq!(
         conn.transaction_async_with_retry(
-            |_| async { Err::<(), _>(diesel::result::Error::NotFound) },
+            |_| async { Err::<(), _>(RunError::DieselError(diesel::result::Error::NotFound)) },
             || async { panic!("Should not attempt to retry this operation") }
         )
         .await
         .expect_err("Transaction should have failed"),
-        diesel::result::Error::NotFound,
+        RunError::DieselError(diesel::result::Error::NotFound),
     );
     assert_eq!(conn.transaction_depth().await.unwrap(), 0);
 
@@ -361,7 +368,10 @@ async fn test_transaction_automatic_retry_nested_transactions_fail() {
                     )
                     .await
                     .expect_err("Nested transaction should have failed");
-                assert_eq!(err, diesel::result::Error::AlreadyInTransaction);
+                assert_eq!(
+                    err,
+                    RunError::DieselError(diesel::result::Error::AlreadyInTransaction)
+                );
 
                 // We still want to show that control exists within the outer
                 // transaction, so we explicitly return here.
@@ -395,9 +405,9 @@ async fn test_transaction_custom_error() {
         Other,
     }
 
-    impl From<diesel::result::Error> for MyError {
-        fn from(error: diesel::result::Error) -> Self {
-            MyError::Db(ConnectionError::Query(error))
+    impl From<RunError> for MyError {
+        fn from(error: RunError) -> Self {
+            MyError::Db(ConnectionError::from(error))
         }
     }
 
