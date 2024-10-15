@@ -1,6 +1,6 @@
 //! Async versions of traits for issuing Diesel queries.
 
-use crate::connection::Connection;
+use crate::{connection::Connection, error::RunError};
 use async_trait::async_trait;
 use diesel::{
     connection::{
@@ -21,7 +21,7 @@ use std::any::Any;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::MutexGuard;
-use tokio::task::spawn_blocking;
+use tokio::task::{spawn_blocking, JoinError};
 
 /// An async variant of [`diesel::connection::SimpleConnection`].
 #[async_trait]
@@ -48,13 +48,13 @@ where
     Conn: 'static + DieselConnection + R2D2Connection,
     Self: Send + Sized + 'static,
 {
-    async fn ping_async(&mut self) -> diesel::result::QueryResult<()> {
+    async fn ping_async(&mut self) -> Result<(), RunError> {
         self.as_async_conn().run(|conn| conn.ping()).await
     }
 
     async fn is_broken_async(&mut self) -> bool {
         self.as_async_conn()
-            .run(|conn| Ok::<bool, ()>(conn.is_broken()))
+            .run(|conn| Ok::<bool, _>(conn.is_broken()))
             .await
             .unwrap()
     }
@@ -75,43 +75,36 @@ where
     fn as_async_conn(&self) -> &Connection<Conn>;
 
     /// Runs the function `f` in an context where blocking is safe.
-    async fn run<R, E, Func>(&self, f: Func) -> Result<R, E>
+    async fn run<R, Func>(&self, f: Func) -> Result<R, RunError>
     where
         R: Send + 'static,
-        E: Send + 'static,
-        Func: FnOnce(&mut Conn) -> Result<R, E> + Send + 'static,
+        Func: FnOnce(&mut Conn) -> Result<R, DieselError> + Send + 'static,
     {
         let connection = self.get_owned_connection();
         connection.run_with_connection(f).await
     }
 
     #[doc(hidden)]
-    async fn run_with_connection<R, E, Func>(self, f: Func) -> Result<R, E>
+    async fn run_with_connection<R, Func>(self, f: Func) -> Result<R, RunError>
     where
         R: Send + 'static,
-        E: Send + 'static,
-        Func: FnOnce(&mut Conn) -> Result<R, E> + Send + 'static,
+        Func: FnOnce(&mut Conn) -> Result<R, DieselError> + Send + 'static,
     {
-        spawn_blocking(move || f(&mut *self.as_sync_conn()))
-            .await
-            .unwrap() // Propagate panics
+        handle_spawn_blocking_error(spawn_blocking(move || f(&mut *self.as_sync_conn())).await)
     }
 
     #[doc(hidden)]
-    async fn run_with_shared_connection<R, E, Func>(self: &Arc<Self>, f: Func) -> Result<R, E>
+    async fn run_with_shared_connection<R, Func>(self: &Arc<Self>, f: Func) -> Result<R, RunError>
     where
         R: Send + 'static,
-        E: Send + 'static,
-        Func: FnOnce(&mut Conn) -> Result<R, E> + Send + 'static,
+        Func: FnOnce(&mut Conn) -> Result<R, DieselError> + Send + 'static,
     {
         let conn = self.clone();
-        spawn_blocking(move || f(&mut *conn.as_sync_conn()))
-            .await
-            .unwrap() // Propagate panics
+        handle_spawn_blocking_error(spawn_blocking(move || f(&mut *conn.as_sync_conn())).await)
     }
 
     #[doc(hidden)]
-    async fn transaction_depth(&self) -> Result<u32, DieselError> {
+    async fn transaction_depth(&self) -> Result<u32, RunError> {
         let conn = self.get_owned_connection();
 
         Self::run_with_connection(conn, |conn| {
@@ -131,9 +124,9 @@ where
     // This method is a wrapper around that call, with validation that
     // we're actually issuing the BEGIN statement here.
     #[doc(hidden)]
-    async fn start_transaction(self: &Arc<Self>) -> Result<(), DieselError> {
+    async fn start_transaction(self: &Arc<Self>) -> Result<(), RunError> {
         if self.transaction_depth().await? != 0 {
-            return Err(DieselError::AlreadyInTransaction);
+            return Err(RunError::DieselError(DieselError::AlreadyInTransaction));
         }
         self.run_with_shared_connection(|conn| Conn::TransactionManager::begin_transaction(conn))
             .await?;
@@ -146,11 +139,11 @@ where
     // This method is a wrapper around that call, with validation that
     // we're actually issuing our first SAVEPOINT here.
     #[doc(hidden)]
-    async fn add_retry_savepoint(self: &Arc<Self>) -> Result<(), DieselError> {
+    async fn add_retry_savepoint(self: &Arc<Self>) -> Result<(), RunError> {
         match self.transaction_depth().await? {
-            0 => return Err(DieselError::NotInTransaction),
+            0 => return Err(RunError::DieselError(DieselError::NotInTransaction)),
             1 => (),
-            _ => return Err(DieselError::AlreadyInTransaction),
+            _ => return Err(RunError::DieselError(DieselError::AlreadyInTransaction)),
         };
 
         self.run_with_shared_connection(|conn| Conn::TransactionManager::begin_transaction(conn))
@@ -159,14 +152,14 @@ where
     }
 
     #[doc(hidden)]
-    async fn commit_transaction(self: &Arc<Self>) -> Result<(), DieselError> {
+    async fn commit_transaction(self: &Arc<Self>) -> Result<(), RunError> {
         self.run_with_shared_connection(|conn| Conn::TransactionManager::commit_transaction(conn))
             .await?;
         Ok(())
     }
 
     #[doc(hidden)]
-    async fn rollback_transaction(self: &Arc<Self>) -> Result<(), DieselError> {
+    async fn rollback_transaction(self: &Arc<Self>) -> Result<(), RunError> {
         self.run_with_shared_connection(|conn| {
             Conn::TransactionManager::rollback_transaction(conn)
         })
@@ -185,10 +178,10 @@ where
         &'a self,
         f: Func,
         retry: RetryFunc,
-    ) -> Result<R, DieselError>
+    ) -> Result<R, RunError>
     where
         R: Any + Send + 'static,
-        Fut: FutureExt<Output = Result<R, DieselError>> + Send,
+        Fut: FutureExt<Output = Result<R, RunError>> + Send,
         Func: (Fn(Connection<Conn>) -> Fut) + Send + Sync,
         RetryFut: FutureExt<Output = bool> + Send,
         RetryFunc: Fn() -> RetryFut + Send + Sync,
@@ -221,11 +214,11 @@ where
     #[cfg(feature = "cockroach")]
     async fn transaction_async_with_retry_inner(
         &self,
-        f: &(dyn Fn(Connection<Conn>) -> BoxFuture<'_, Result<Box<dyn Any + Send>, DieselError>>
+        f: &(dyn Fn(Connection<Conn>) -> BoxFuture<'_, Result<Box<dyn Any + Send>, RunError>>
               + Send
               + Sync),
         retry: &(dyn Fn() -> BoxFuture<'_, bool> + Send + Sync),
-    ) -> Result<Box<dyn Any + Send>, DieselError> {
+    ) -> Result<Box<dyn Any + Send>, RunError> {
         // Check out a connection once, and use it for the duration of the
         // operation.
         let conn = Arc::new(self.get_owned_connection());
@@ -262,20 +255,26 @@ where
                         //
                         // We're still in the transaction, but we at least
                         // tried to ROLLBACK to our savepoint.
-                        if !retryable_error(&err) || !retry().await {
+                        let retried = match &err {
+                            RunError::DieselError(err) => retryable_error(err) && retry().await,
+                            RunError::RuntimeShutdown => false,
+                        };
+                        if retried {
+                            // ROLLBACK happened, we want to retry.
+                            continue;
+                        } else {
                             // Bail: ROLLBACK the initial BEGIN statement too.
+                            // In the case of the run
                             let _ = Self::rollback_transaction(&conn).await;
                             return Err(err);
                         }
-                        // ROLLBACK happened, we want to retry.
-                        continue;
                     }
 
                     // Commit the top-level transaction too.
                     Self::commit_transaction(&conn).await?;
                     return Ok(value);
                 }
-                Err(user_error) => {
+                Err(RunError::DieselError(user_error)) => {
                     // The user-level operation failed: ROLLBACK to the retry
                     // savepoint.
                     if let Err(first_rollback_err) = Self::rollback_transaction(&conn).await {
@@ -295,9 +294,17 @@ where
 
                     // If we aren't retrying, ROLLBACK the BEGIN statement too.
                     return match Self::rollback_transaction(&conn).await {
-                        Ok(()) => Err(user_error),
+                        Ok(()) => Err(RunError::DieselError(user_error)),
                         Err(err) => Err(err),
                     };
+                }
+                Err(RunError::RuntimeShutdown) => {
+                    // The runtime is shutting down: attempt to ROLLBACK the
+                    // transaction. You might think it's pointless to try and
+                    // do this, but in reality the shutdown timeout for async
+                    // tasks might not have expired.
+                    let _ = Self::rollback_transaction(&conn).await;
+                    return Err(RunError::RuntimeShutdown);
                 }
             }
         }
@@ -306,7 +313,7 @@ where
     async fn transaction_async<R, E, Func, Fut, 'a>(&'a self, f: Func) -> Result<R, E>
     where
         R: Send + 'static,
-        E: From<DieselError> + Send + 'static,
+        E: From<RunError> + Send + 'static,
         Fut: Future<Output = Result<R, E>> + Send,
         Func: FnOnce(Connection<Conn>) -> Fut + Send,
     {
@@ -325,9 +332,8 @@ where
                 .boxed()
         });
 
-        self.transaction_async_inner(f)
-            .await
-            .map(|v| *v.downcast::<R>().expect("Should be an 'R' type"))
+        let v = self.transaction_async_inner(f).await?;
+        Ok(*v.downcast::<R>().expect("Should be an 'R' type"))
     }
 
     // NOTE: This function intentionally avoids as many generic parameters as possible
@@ -340,7 +346,7 @@ where
         >,
     ) -> Result<Box<dyn Any + Send>, E>
     where
-        E: From<DieselError> + Send + 'static,
+        E: From<RunError> + Send + 'static,
     {
         // Check out a connection once, and use it for the duration of the
         // operation.
@@ -351,10 +357,8 @@ where
         //
         // However, it modifies all callsites to instead issue
         // known-to-be-synchronous operations from an asynchronous context.
-        conn.run_with_shared_connection(|conn| {
-            Conn::TransactionManager::begin_transaction(conn).map_err(E::from)
-        })
-        .await?;
+        conn.run_with_shared_connection(|conn| Conn::TransactionManager::begin_transaction(conn))
+            .await?;
 
         // TODO: The ideal interface would pass the "async_conn" object to the
         // underlying function "f" by reference.
@@ -372,21 +376,45 @@ where
         match f(async_conn).await {
             Ok(value) => {
                 conn.run_with_shared_connection(|conn| {
-                    Conn::TransactionManager::commit_transaction(conn).map_err(E::from)
+                    Conn::TransactionManager::commit_transaction(conn)
                 })
                 .await?;
                 Ok(value)
             }
             Err(user_error) => {
-                match conn
-                    .run_with_shared_connection(|conn| {
-                        Conn::TransactionManager::rollback_transaction(conn).map_err(E::from)
-                    })
-                    .await
-                {
-                    Ok(()) => Err(user_error),
-                    Err(err) => Err(err),
-                }
+                conn.run_with_shared_connection(|conn| {
+                    Conn::TransactionManager::rollback_transaction(conn)
+                })
+                .await?;
+                Err(user_error)
+            }
+        }
+    }
+}
+
+fn handle_spawn_blocking_error<T>(
+    result: Result<Result<T, DieselError>, JoinError>,
+) -> Result<T, RunError> {
+    match result {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(err)) => Err(RunError::DieselError(err)),
+        Err(err) => {
+            if err.is_cancelled() {
+                // The only way a spawn_blocking task can be marked cancelled
+                // is if the runtime started shutting down _before_
+                // spawn_blocking was called.
+                Err(RunError::RuntimeShutdown)
+            } else if err.is_panic() {
+                // Propagate panics.
+                std::panic::panic_any(err.into_panic());
+            } else {
+                // Not possible to reach this as of Tokio 1.40, but maybe in
+                // future versions.
+                panic!(
+                    "unexpected JoinError, did a new version of Tokio add \
+                     a source other than panics and cancellations? {:?}",
+                    err
+                );
             }
         }
     }
@@ -398,26 +426,26 @@ pub trait AsyncRunQueryDsl<Conn, AsyncConn>
 where
     Conn: 'static + DieselConnection,
 {
-    async fn execute_async(self, asc: &AsyncConn) -> Result<usize, DieselError>
+    async fn execute_async(self, asc: &AsyncConn) -> Result<usize, RunError>
     where
         Self: ExecuteDsl<Conn>;
 
-    async fn load_async<U>(self, asc: &AsyncConn) -> Result<Vec<U>, DieselError>
+    async fn load_async<U>(self, asc: &AsyncConn) -> Result<Vec<U>, RunError>
     where
         U: Send + 'static,
         Self: LoadQuery<'static, Conn, U>;
 
-    async fn get_result_async<U>(self, asc: &AsyncConn) -> Result<U, DieselError>
+    async fn get_result_async<U>(self, asc: &AsyncConn) -> Result<U, RunError>
     where
         U: Send + 'static,
         Self: LoadQuery<'static, Conn, U>;
 
-    async fn get_results_async<U>(self, asc: &AsyncConn) -> Result<Vec<U>, DieselError>
+    async fn get_results_async<U>(self, asc: &AsyncConn) -> Result<Vec<U>, RunError>
     where
         U: Send + 'static,
         Self: LoadQuery<'static, Conn, U>;
 
-    async fn first_async<U>(self, asc: &AsyncConn) -> Result<U, DieselError>
+    async fn first_async<U>(self, asc: &AsyncConn) -> Result<U, RunError>
     where
         U: Send + 'static,
         Self: LimitDsl,
@@ -431,14 +459,14 @@ where
     Conn: 'static + DieselConnection,
     AsyncConn: Send + Sync + AsyncConnection<Conn>,
 {
-    async fn execute_async(self, asc: &AsyncConn) -> Result<usize, DieselError>
+    async fn execute_async(self, asc: &AsyncConn) -> Result<usize, RunError>
     where
         Self: ExecuteDsl<Conn>,
     {
         asc.run(|conn| self.execute(conn)).await
     }
 
-    async fn load_async<U>(self, asc: &AsyncConn) -> Result<Vec<U>, DieselError>
+    async fn load_async<U>(self, asc: &AsyncConn) -> Result<Vec<U>, RunError>
     where
         U: Send + 'static,
         Self: LoadQuery<'static, Conn, U>,
@@ -446,7 +474,7 @@ where
         asc.run(|conn| self.load(conn)).await
     }
 
-    async fn get_result_async<U>(self, asc: &AsyncConn) -> Result<U, DieselError>
+    async fn get_result_async<U>(self, asc: &AsyncConn) -> Result<U, RunError>
     where
         U: Send + 'static,
         Self: LoadQuery<'static, Conn, U>,
@@ -454,7 +482,7 @@ where
         asc.run(|conn| self.get_result(conn)).await
     }
 
-    async fn get_results_async<U>(self, asc: &AsyncConn) -> Result<Vec<U>, DieselError>
+    async fn get_results_async<U>(self, asc: &AsyncConn) -> Result<Vec<U>, RunError>
     where
         U: Send + 'static,
         Self: LoadQuery<'static, Conn, U>,
@@ -462,7 +490,7 @@ where
         asc.run(|conn| self.get_results(conn)).await
     }
 
-    async fn first_async<U>(self, asc: &AsyncConn) -> Result<U, DieselError>
+    async fn first_async<U>(self, asc: &AsyncConn) -> Result<U, RunError>
     where
         U: Send + 'static,
         Self: LimitDsl,
@@ -477,7 +505,7 @@ pub trait AsyncSaveChangesDsl<Conn, AsyncConn>
 where
     Conn: 'static + DieselConnection,
 {
-    async fn save_changes_async<Output>(self, asc: &AsyncConn) -> Result<Output, DieselError>
+    async fn save_changes_async<Output>(self, asc: &AsyncConn) -> Result<Output, RunError>
     where
         Self: Sized,
         Conn: diesel::query_dsl::UpdateAndFetchResults<Self, Output>,
@@ -491,7 +519,7 @@ where
     Conn: 'static + DieselConnection,
     AsyncConn: Send + Sync + AsyncConnection<Conn>,
 {
-    async fn save_changes_async<Output>(self, asc: &AsyncConn) -> Result<Output, DieselError>
+    async fn save_changes_async<Output>(self, asc: &AsyncConn) -> Result<Output, RunError>
     where
         Conn: diesel::query_dsl::UpdateAndFetchResults<Self, Output>,
         Output: Send + 'static,
