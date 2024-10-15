@@ -208,13 +208,17 @@ async fn test_transaction_automatic_retry_explicit_rollback() {
 
                     if *count < 2 {
                         eprintln!("test: Manually restarting txn");
-                        return Err::<(), _>(RunError::User(diesel::result::Error::DatabaseError(
-                            diesel::result::DatabaseErrorKind::SerializationFailure,
-                            Box::new("restart transaction".to_string()),
-                        )));
+                        return Err::<(), _>(RunError::DieselError(
+                            diesel::result::Error::DatabaseError(
+                                diesel::result::DatabaseErrorKind::SerializationFailure,
+                                Box::new("restart transaction".to_string()),
+                            ),
+                        ));
                     }
                     eprintln!("test: Manually rolling back txn");
-                    return Err(RunError::User(diesel::result::Error::RollbackTransaction));
+                    return Err(RunError::DieselError(
+                        diesel::result::Error::RollbackTransaction,
+                    ));
                 }
             },
             || async {
@@ -227,7 +231,7 @@ async fn test_transaction_automatic_retry_explicit_rollback() {
 
     assert_eq!(
         err,
-        RunError::User(diesel::result::Error::RollbackTransaction)
+        RunError::DieselError(diesel::result::Error::RollbackTransaction)
     );
     assert_eq!(conn.transaction_depth().await.unwrap(), 0);
 
@@ -320,12 +324,12 @@ async fn test_transaction_automatic_retry_does_not_retry_non_retryable_errors() 
     assert_eq!(conn.transaction_depth().await.unwrap(), 0);
     assert_eq!(
         conn.transaction_async_with_retry(
-            |_| async { Err::<(), _>(RunError::User(diesel::result::Error::NotFound)) },
+            |_| async { Err::<(), _>(RunError::DieselError(diesel::result::Error::NotFound)) },
             || async { panic!("Should not attempt to retry this operation") }
         )
         .await
         .expect_err("Transaction should have failed"),
-        RunError::User(diesel::result::Error::NotFound),
+        RunError::DieselError(diesel::result::Error::NotFound),
     );
     assert_eq!(conn.transaction_depth().await.unwrap(), 0);
 
@@ -366,7 +370,7 @@ async fn test_transaction_automatic_retry_nested_transactions_fail() {
                     .expect_err("Nested transaction should have failed");
                 assert_eq!(
                     err,
-                    RunError::User(diesel::result::Error::AlreadyInTransaction)
+                    RunError::DieselError(diesel::result::Error::AlreadyInTransaction)
                 );
 
                 // We still want to show that control exists within the outer
@@ -401,8 +405,8 @@ async fn test_transaction_custom_error() {
         Other,
     }
 
-    impl From<RunError<diesel::result::Error>> for MyError {
-        fn from(error: RunError<diesel::result::Error>) -> Self {
+    impl From<RunError> for MyError {
+        fn from(error: RunError) -> Self {
             MyError::Db(ConnectionError::from(error))
         }
     }

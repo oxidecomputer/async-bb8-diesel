@@ -25,10 +25,10 @@ pub enum ConnectionError {
     RuntimeShutdown,
 }
 
-impl From<RunError<DieselError>> for ConnectionError {
-    fn from(error: RunError<DieselError>) -> Self {
+impl From<RunError> for ConnectionError {
+    fn from(error: RunError) -> Self {
         match error {
-            RunError::User(e) => ConnectionError::Query(e),
+            RunError::DieselError(e) => ConnectionError::Query(e),
             RunError::RuntimeShutdown => ConnectionError::RuntimeShutdown,
         }
     }
@@ -56,11 +56,11 @@ impl<T> OptionalExtension<T> for Result<T, ConnectionError> {
     }
 }
 
-impl<T> OptionalExtension<T> for Result<T, RunError<DieselError>> {
+impl<T> OptionalExtension<T> for Result<T, RunError> {
     fn optional(self) -> Result<Option<T>, ConnectionError> {
         let self_as_query_result: diesel::QueryResult<T> = match self {
             Ok(value) => Ok(value),
-            Err(RunError::User(error_kind)) => Err(error_kind),
+            Err(RunError::DieselError(error_kind)) => Err(error_kind),
             Err(RunError::RuntimeShutdown) => return Err(ConnectionError::RuntimeShutdown),
         };
 
@@ -70,24 +70,15 @@ impl<T> OptionalExtension<T> for Result<T, RunError<DieselError>> {
     }
 }
 
-/// Errors encountered while running a function on a connection pool.
-#[derive(Error, Debug, Clone, Copy, Eq, PartialEq)]
-pub enum RunError<E> {
-    #[error("error in user code")]
-    User(#[from] E),
+/// An error encountered while running a function on a connection pool.
+#[derive(Error, Debug, PartialEq)]
+pub enum RunError {
+    /// There was a Diesel error running the query.
+    #[error(transparent)]
+    DieselError(#[from] DieselError),
 
     #[error("runtime shutting down")]
     RuntimeShutdown,
-}
-
-impl<E> RunError<RunError<E>> {
-    /// Flatten a nested `RunError`.
-    pub fn flatten(self) -> RunError<E> {
-        match self {
-            RunError::User(inner) => inner,
-            RunError::RuntimeShutdown => RunError::RuntimeShutdown,
-        }
-    }
 }
 
 /// Describes an error performing an operation from a connection pool.
