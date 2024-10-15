@@ -20,6 +20,18 @@ pub enum ConnectionError {
 
     #[error("Failed to issue a query: {0}")]
     Query(#[from] DieselError),
+
+    #[error("runtime shutting down")]
+    RuntimeShutdown,
+}
+
+impl From<RunError<DieselError>> for ConnectionError {
+    fn from(error: RunError<DieselError>) -> Self {
+        match error {
+            RunError::User(e) => ConnectionError::Query(e),
+            RunError::RuntimeShutdown => ConnectionError::RuntimeShutdown,
+        }
+    }
 }
 
 /// Syntactic sugar around a Result returning an [`PoolError`].
@@ -41,6 +53,40 @@ impl<T> OptionalExtension<T> for Result<T, ConnectionError> {
         self_as_query_result
             .optional()
             .map_err(ConnectionError::Query)
+    }
+}
+
+impl<T> OptionalExtension<T> for Result<T, RunError<DieselError>> {
+    fn optional(self) -> Result<Option<T>, ConnectionError> {
+        let self_as_query_result: diesel::QueryResult<T> = match self {
+            Ok(value) => Ok(value),
+            Err(RunError::User(error_kind)) => Err(error_kind),
+            Err(RunError::RuntimeShutdown) => return Err(ConnectionError::RuntimeShutdown),
+        };
+
+        self_as_query_result
+            .optional()
+            .map_err(ConnectionError::Query)
+    }
+}
+
+/// Errors encountered while running a function on a connection pool.
+#[derive(Error, Debug, Clone, Copy, Eq, PartialEq)]
+pub enum RunError<E> {
+    #[error("error in user code")]
+    User(#[from] E),
+
+    #[error("runtime shutting down")]
+    RuntimeShutdown,
+}
+
+impl<E> RunError<RunError<E>> {
+    /// Flatten a nested `RunError`.
+    pub fn flatten(self) -> RunError<E> {
+        match self {
+            RunError::User(inner) => inner,
+            RunError::RuntimeShutdown => RunError::RuntimeShutdown,
+        }
     }
 }
 
