@@ -75,7 +75,7 @@ where
     }
 
     async fn is_valid(&self, conn: &mut Self::Connection) -> Result<(), Self::Error> {
-        let c = Connection(conn.0.clone());
+        let c = conn.clone();
         self.run_blocking(move |m| {
             m.is_valid(&mut *c.inner())?;
             Ok(())
