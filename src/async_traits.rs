@@ -49,6 +49,7 @@ fn retryable_error(err: &DieselError) -> bool {
 //
 // This aims to help avoid leaving open transactions alive
 // if an asynchronous transaction is cancelled.
+#[must_use]
 struct ConnectionKiller<'a, Conn>
 where
     Conn: DieselConnection,
@@ -124,7 +125,7 @@ where
     #[doc(hidden)]
     fn as_async_conn(&self) -> &Connection<Conn>;
 
-    // Identifies if the conneciton has been broken
+    // Identifies if the connection has been broken
     // by an invalid transaction. This should prevent
     // future usage.
     #[doc(hidden)]
