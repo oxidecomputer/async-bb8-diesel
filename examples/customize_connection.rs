@@ -12,7 +12,10 @@ struct ConnectionCustomizer {}
 type DieselPgConn = Connection<PgConnection>;
 
 impl bb8::CustomizeConnection<DieselPgConn, ConnectionError> for ConnectionCustomizer {
-    fn on_acquire<'a>(&'a self, connection: &'a mut DieselPgConn) -> Pin<Box<dyn Future<Output = Result<(), ConnectionError>> + Send + 'a>> {
+    fn on_acquire<'a>(
+        &'a self,
+        connection: &'a mut DieselPgConn,
+    ) -> Pin<Box<dyn Future<Output = Result<(), ConnectionError>> + Send + 'a>> {
         Box::pin(async move {
             let res = connection
                 .batch_execute_async("please execute some raw sql for me")
