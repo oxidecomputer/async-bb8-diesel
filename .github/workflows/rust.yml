@@ -39,6 +39,9 @@ jobs:
     steps:
     # actions/checkout@v2
     - uses: actions/checkout@d632683dd7b4114ad314bca15554477dd762a938
+    - name: Install PostgreSQL (macOS)
+      if: runner.os == 'macOS'
+      run: brew install postgresql
     - name: Build
       run: cargo build --tests --verbose
     - name: Run tests
