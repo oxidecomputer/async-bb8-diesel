@@ -35,10 +35,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ ubuntu-latest, macos-12 ]
+        os: [ ubuntu-latest, macos-14 ]
     steps:
     # actions/checkout@v2
     - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8
+    - name: Install PostgreSQL (macOS)
+      if: runner.os == 'macOS'
+      run: brew install postgresql
     - name: Build
       run: cargo build --tests --verbose
     - name: Run tests
