@@ -16,7 +16,7 @@ default = [ "cockroach" ]
 [dependencies]
 bb8 = "0.8"
 async-trait = "0.1.89"
-diesel = { version = "2.2.2", default-features = false, features = [ "r2d2" ] }
+diesel = { version = "2.3.4", default-features = false, features = [ "r2d2" ] }
 futures = "0.3"
 thiserror = "1.0"
 tokio = { version = "1.32", default-features = false, features = [ "rt-multi-thread" ] }
@@ -24,7 +24,7 @@ tokio = { version = "1.32", default-features = false, features = [ "rt-multi-thr
 [dev-dependencies]
 anyhow = "1.0"
 crdb-harness = "0.0.1"
-diesel = { version = "2.2.2", features = [ "postgres", "r2d2" ] }
+diesel = { version = "2.3.4", features = [ "postgres", "r2d2" ] }
 libc = "0.2.178"
 tempfile = "3.8"
 tokio = { version = "1.32", features = [ "macros", "fs", "process" ] }
