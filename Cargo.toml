@@ -18,7 +18,7 @@ bb8 = "0.8"
 async-trait = "0.1.89"
 diesel = { version = "2.3.4", default-features = false, features = [ "r2d2" ] }
 futures = "0.3"
-thiserror = "1.0"
+thiserror = "2.0"
 tokio = { version = "1.32", default-features = false, features = [ "rt-multi-thread" ] }
 
 [dev-dependencies]
