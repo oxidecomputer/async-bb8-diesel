@@ -41,6 +41,57 @@ fn retryable_error(err: &DieselError) -> bool {
     }
 }
 
+// Kills the connection when this object is dropped.
+//
+// Specifically, this sets the diesel "TransactionManager" state
+// to broken, which should prevent any subsequent access to the
+// connection from succceeding.
+//
+// This aims to help avoid leaving open transactions alive
+// if an asynchronous transaction is cancelled.
+#[must_use]
+struct ConnectionKiller<'a, Conn>
+where
+    Conn: DieselConnection,
+{
+    conn: Option<&'a Connection<Conn>>,
+}
+
+impl<'a, Conn> ConnectionKiller<'a, Conn>
+where
+    Conn: DieselConnection,
+{
+    fn new(conn: &'a Connection<Conn>) -> ConnectionKiller<'a, Conn> {
+        Self { conn: Some(conn) }
+    }
+
+    // Prevents the connection from being killed.
+    //
+    // This should be called if a transaction has completed successfully.
+    fn spare(&mut self) {
+        self.conn.take();
+    }
+}
+
+impl<'a, Conn> Drop for ConnectionKiller<'a, Conn>
+where
+    Conn: DieselConnection,
+{
+    fn drop(&mut self) {
+        let Some(conn) = self.conn.take() else {
+            return;
+        };
+
+        // Ensure that non-transaction operations fail
+        conn.mark_broken();
+
+        // Ensure that transactions fail
+        let mut conn = conn.inner();
+        *Conn::TransactionManager::transaction_manager_status_mut(&mut *conn) =
+            TransactionManagerStatus::InError;
+    }
+}
+
 /// An async variant of [`diesel::r2d2::R2D2Connection`].
 #[async_trait]
 pub trait AsyncR2D2Connection<Conn>: AsyncConnection<Conn>
@@ -54,7 +105,7 @@ where
 
     async fn is_broken_async(&mut self) -> bool {
         self.as_async_conn()
-            .run(|conn| Ok::<bool, ()>(conn.is_broken()))
+            .run(|conn| Ok::<bool, _>(conn.is_broken()))
             .await
             .unwrap()
     }
@@ -74,24 +125,34 @@ where
     #[doc(hidden)]
     fn as_async_conn(&self) -> &Connection<Conn>;
 
+    // Identifies if the connection has been broken
+    // by an invalid transaction. This should prevent
+    // future usage.
+    #[doc(hidden)]
+    fn is_broken_from_txn(&self) -> bool {
+        false
+    }
+
     /// Runs the function `f` in an context where blocking is safe.
-    async fn run<R, E, Func>(&self, f: Func) -> Result<R, E>
+    async fn run<R, Func>(&self, f: Func) -> Result<R, DieselError>
     where
         R: Send + 'static,
-        E: Send + 'static,
-        Func: FnOnce(&mut Conn) -> Result<R, E> + Send + 'static,
+        Func: FnOnce(&mut Conn) -> Result<R, DieselError> + Send + 'static,
     {
         let connection = self.get_owned_connection();
         connection.run_with_connection(f).await
     }
 
     #[doc(hidden)]
-    async fn run_with_connection<R, E, Func>(self, f: Func) -> Result<R, E>
+    async fn run_with_connection<R, Func>(self, f: Func) -> Result<R, DieselError>
     where
         R: Send + 'static,
-        E: Send + 'static,
-        Func: FnOnce(&mut Conn) -> Result<R, E> + Send + 'static,
+        Func: FnOnce(&mut Conn) -> Result<R, DieselError> + Send + 'static,
     {
+        if self.is_broken_from_txn() {
+            return Err(DieselError::BrokenTransactionManager);
+        }
+
         spawn_blocking(move || f(&mut *self.as_sync_conn()))
             .await
             .unwrap() // Propagate panics
@@ -111,18 +172,15 @@ where
     }
 
     #[doc(hidden)]
-    async fn transaction_depth(&self) -> Result<u32, DieselError> {
-        let conn = self.get_owned_connection();
+    fn transaction_depth(&self) -> Result<u32, DieselError> {
+        let mut conn = self.as_sync_conn();
 
-        Self::run_with_connection(conn, |conn| {
-            match Conn::TransactionManager::transaction_manager_status_mut(&mut *conn) {
-                TransactionManagerStatus::Valid(status) => {
-                    Ok(status.transaction_depth().map(|d| d.into()).unwrap_or(0))
-                }
-                TransactionManagerStatus::InError => Err(DieselError::BrokenTransactionManager),
+        match Conn::TransactionManager::transaction_manager_status_mut(&mut *conn) {
+            TransactionManagerStatus::Valid(status) => {
+                Ok(status.transaction_depth().map(|d| d.into()).unwrap_or(0))
             }
-        })
-        .await
+            TransactionManagerStatus::InError => Err(DieselError::BrokenTransactionManager),
+        }
     }
 
     // Diesel's "begin_transaction" chooses whether to issue "BEGIN" or a
@@ -132,7 +190,7 @@ where
     // we're actually issuing the BEGIN statement here.
     #[doc(hidden)]
     async fn start_transaction(self: &Arc<Self>) -> Result<(), DieselError> {
-        if self.transaction_depth().await? != 0 {
+        if self.transaction_depth()? != 0 {
             return Err(DieselError::AlreadyInTransaction);
         }
         self.run_with_shared_connection(|conn| Conn::TransactionManager::begin_transaction(conn))
@@ -147,7 +205,7 @@ where
     // we're actually issuing our first SAVEPOINT here.
     #[doc(hidden)]
     async fn add_retry_savepoint(self: &Arc<Self>) -> Result<(), DieselError> {
-        match self.transaction_depth().await? {
+        match self.transaction_depth()? {
             0 => return Err(DieselError::NotInTransaction),
             1 => (),
             _ => return Err(DieselError::AlreadyInTransaction),
@@ -230,6 +288,12 @@ where
         // operation.
         let conn = Arc::new(self.get_owned_connection());
 
+        // Before we start doing any transaction operations, if we drop
+        // this future before exiting this function cleanly, we want to
+        // ensure the connection is killed, rather than existing in a
+        // "unknown, mid-transaction" state.
+        let mut killer = ConnectionKiller::new(conn.as_async_conn());
+
         // Refer to CockroachDB's guide on advanced client-side transaction
         // retries for the full context:
         // https://www.cockroachlabs.com/docs/v23.1/advanced-client-side-transaction-retries
@@ -241,7 +305,9 @@ where
         // TODO: It may be preferable to set this once per connection -- but
         // that'll require more interaction with how sessions with the database
         // are constructed.
-        Self::start_transaction(&conn).await?;
+        Self::start_transaction(&conn).await.inspect_err(|_| {
+            killer.spare();
+        })?;
         conn.run_with_shared_connection(|conn| {
             conn.batch_execute("SET LOCAL force_savepoint_restart = true")
         })
@@ -251,7 +317,7 @@ where
             // Add a SAVEPOINT to which we can later return.
             Self::add_retry_savepoint(&conn).await?;
 
-            let async_conn = Connection(Self::as_async_conn(&conn).0.clone());
+            let async_conn = Self::as_async_conn(&conn).clone();
             match f(async_conn).await {
                 Ok(value) => {
                     // The user-level operation succeeded: try to commit the
@@ -265,6 +331,7 @@ where
                         if !retryable_error(&err) || !retry().await {
                             // Bail: ROLLBACK the initial BEGIN statement too.
                             let _ = Self::rollback_transaction(&conn).await;
+                            killer.spare();
                             return Err(err);
                         }
                         // ROLLBACK happened, we want to retry.
@@ -273,6 +340,7 @@ where
 
                     // Commit the top-level transaction too.
                     Self::commit_transaction(&conn).await?;
+                    killer.spare();
                     return Ok(value);
                 }
                 Err(user_error) => {
@@ -281,10 +349,12 @@ where
                     if let Err(first_rollback_err) = Self::rollback_transaction(&conn).await {
                         // If we fail while rolling back, prioritize returning
                         // the ROLLBACK error over the user errors.
-                        return match Self::rollback_transaction(&conn).await {
+                        let res = match Self::rollback_transaction(&conn).await {
                             Ok(()) => Err(first_rollback_err),
                             Err(second_rollback_err) => Err(second_rollback_err),
                         };
+                        killer.spare();
+                        return res;
                     }
 
                     // We rolled back to the retry savepoint, and now want to
@@ -294,10 +364,12 @@ where
                     }
 
                     // If we aren't retrying, ROLLBACK the BEGIN statement too.
-                    return match Self::rollback_transaction(&conn).await {
+                    let res = match Self::rollback_transaction(&conn).await {
                         Ok(()) => Err(user_error),
                         Err(err) => Err(err),
                     };
+                    killer.spare();
+                    return res;
                 }
             }
         }
@@ -346,6 +418,12 @@ where
         // operation.
         let conn = Arc::new(self.get_owned_connection());
 
+        // Before we start doing any transaction operations, if we drop
+        // this future before exiting this function cleanly, we want to
+        // ensure the connection is killed, rather than existing in a
+        // "unknown, mid-transaction" state.
+        let mut killer = ConnectionKiller::new(conn.as_async_conn());
+
         // This function mimics the implementation of:
         // https://docs.diesel.rs/master/diesel/connection/trait.TransactionManager.html#method.transaction
         //
@@ -354,7 +432,10 @@ where
         conn.run_with_shared_connection(|conn| {
             Conn::TransactionManager::begin_transaction(conn).map_err(E::from)
         })
-        .await?;
+        .await
+        .inspect_err(|_| {
+            killer.spare();
+        })?;
 
         // TODO: The ideal interface would pass the "async_conn" object to the
         // underlying function "f" by reference.
@@ -368,13 +449,16 @@ where
         // enough to be referenceable by a Future, but short enough that we can
         // guarantee it doesn't live persist after this function returns, feel
         // free to make that change.
-        let async_conn = Connection(Self::as_async_conn(&conn).0.clone());
-        match f(async_conn).await {
+        let async_conn = Self::as_async_conn(&conn).clone();
+        let res = match f(async_conn).await {
             Ok(value) => {
                 conn.run_with_shared_connection(|conn| {
                     Conn::TransactionManager::commit_transaction(conn).map_err(E::from)
                 })
-                .await?;
+                .await
+                .inspect_err(|_| {
+                    killer.spare();
+                })?;
                 Ok(value)
             }
             Err(user_error) => {
@@ -388,7 +472,9 @@ where
                     Err(err) => Err(err),
                 }
             }
-        }
+        };
+        killer.spare();
+        res
     }
 }
 

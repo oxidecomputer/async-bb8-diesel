@@ -5,6 +5,7 @@
 use async_bb8_diesel::{
     AsyncConnection, AsyncRunQueryDsl, AsyncSaveChangesDsl, AsyncSimpleConnection, ConnectionError,
 };
+use bb8::ManageConnection;
 use crdb_harness::{CockroachInstance, CockroachStarterBuilder};
 use diesel::OptionalExtension;
 use diesel::{pg::PgConnection, prelude::*};
@@ -150,6 +151,104 @@ async fn test_transaction() {
     test_end(crdb).await;
 }
 
+enum ConnectionState {
+    Dead,
+    Alive,
+}
+
+type ConnectionType = async_bb8_diesel::Connection<PgConnection>;
+
+// Check that we can (or cannot!):
+// - Run a batch SQL operation
+// - Run a specific SQL operation ("INSERT")
+// - Create a transaction
+async fn check(conn: &ConnectionType, expected: ConnectionState) {
+    let result = conn.batch_execute_async("SELECT 1;").await;
+    match expected {
+        ConnectionState::Alive => {
+            result.expect("Should have succeeded");
+        }
+        ConnectionState::Dead => {
+            result.expect_err("Should have failed");
+        }
+    };
+
+    use user::dsl;
+    let result = diesel::insert_into(dsl::user)
+        .values((dsl::id.eq(0), dsl::name.eq("Jim")))
+        .execute_async(&*conn)
+        .await;
+    match expected {
+        ConnectionState::Alive => {
+            result.expect("Should have succeeded");
+        }
+        ConnectionState::Dead => {
+            result.expect_err("Should have failed");
+        }
+    };
+
+    let result = conn
+        .transaction_async(|_conn| async move { Ok::<(), ConnectionError>(()) })
+        .await;
+    match expected {
+        ConnectionState::Alive => {
+            result.expect("Should have succeeded");
+        }
+        ConnectionState::Dead => {
+            result.expect_err("Should have failed");
+        }
+    };
+}
+
+#[tokio::test]
+async fn test_transaction_cancellation() {
+    let crdb = test_start().await;
+
+    let manager = async_bb8_diesel::ConnectionManager::<PgConnection>::new(&crdb.pg_config().url);
+    let conn = manager.connect().await.unwrap();
+
+    check(&conn, ConnectionState::Alive).await;
+
+    // Create a transaction which gets cancelled
+    let txn_fut = conn.transaction_async(|_conn| async move {
+        tokio::time::sleep(tokio::time::Duration::from_secs(1000)).await;
+        Ok::<(), ConnectionError>(())
+    });
+    tokio::time::timeout(tokio::time::Duration::from_millis(5), txn_fut)
+        .await
+        .expect_err("Should have timed out");
+
+    check(&conn, ConnectionState::Dead).await;
+
+    test_end(crdb).await;
+}
+
+#[tokio::test]
+async fn test_transaction_retry_cancellation() {
+    let crdb = test_start().await;
+
+    let manager = async_bb8_diesel::ConnectionManager::<PgConnection>::new(&crdb.pg_config().url);
+    let conn = manager.connect().await.unwrap();
+
+    check(&conn, ConnectionState::Alive).await;
+
+    // Create a retryable transaction which gets cancelled
+    let txn_fut = conn.transaction_async_with_retry(
+        |_conn| async move {
+            tokio::time::sleep(tokio::time::Duration::from_secs(1000)).await;
+            Ok(())
+        },
+        || async { panic!("Should not attempt to retry this operation") },
+    );
+    tokio::time::timeout(tokio::time::Duration::from_millis(5), txn_fut)
+        .await
+        .expect_err("Should have timed out");
+
+    check(&conn, ConnectionState::Dead).await;
+
+    test_end(crdb).await;
+}
+
 #[tokio::test]
 async fn test_transaction_automatic_retry_success_case() {
     let crdb = test_start().await;
@@ -161,10 +260,10 @@ async fn test_transaction_automatic_retry_success_case() {
     use user::dsl;
 
     // Transaction that can retry but does not need to.
-    assert_eq!(conn.transaction_depth().await.unwrap(), 0);
+    assert_eq!(conn.transaction_depth().unwrap(), 0);
     conn.transaction_async_with_retry(
         |conn| async move {
-            assert!(conn.transaction_depth().await.unwrap() > 0);
+            assert!(conn.transaction_depth().unwrap() > 0);
             diesel::insert_into(dsl::user)
                 .values((dsl::id.eq(3), dsl::name.eq("Sally")))
                 .execute_async(&conn)
@@ -175,7 +274,7 @@ async fn test_transaction_automatic_retry_success_case() {
     )
     .await
     .expect("Transaction failed");
-    assert_eq!(conn.transaction_depth().await.unwrap(), 0);
+    assert_eq!(conn.transaction_depth().unwrap(), 0);
 
     test_end(crdb).await;
 }
@@ -197,7 +296,7 @@ async fn test_transaction_automatic_retry_explicit_rollback() {
     //
     // 1. Retries on the first call
     // 2. Explicitly rolls back on the second call
-    assert_eq!(conn.transaction_depth().await.unwrap(), 0);
+    assert_eq!(conn.transaction_depth().unwrap(), 0);
     let err = conn
         .transaction_async_with_retry(
             |_conn| {
@@ -226,7 +325,7 @@ async fn test_transaction_automatic_retry_explicit_rollback() {
         .expect_err("Transaction should have failed");
 
     assert_eq!(err, diesel::result::Error::RollbackTransaction);
-    assert_eq!(conn.transaction_depth().await.unwrap(), 0);
+    assert_eq!(conn.transaction_depth().unwrap(), 0);
 
     // The transaction closure should have been attempted twice, but
     // we should have only asked whether or not to retry once -- after
@@ -264,7 +363,7 @@ async fn test_transaction_automatic_retry_injected_errors() {
     conn.batch_execute_async("SET inject_retry_errors_enabled = true")
         .await
         .expect("Failed to inject error");
-    assert_eq!(conn.transaction_depth().await.unwrap(), 0);
+    assert_eq!(conn.transaction_depth().unwrap(), 0);
     conn.transaction_async_with_retry(
         |conn| {
             let transaction_attempted_count = transaction_attempted_count.clone();
@@ -286,7 +385,7 @@ async fn test_transaction_automatic_retry_injected_errors() {
     )
     .await
     .expect("Transaction should have succeeded");
-    assert_eq!(conn.transaction_depth().await.unwrap(), 0);
+    assert_eq!(conn.transaction_depth().unwrap(), 0);
 
     // The transaction closure should have been attempted twice, but
     // we should have only asked whether or not to retry once -- after
@@ -314,7 +413,7 @@ async fn test_transaction_automatic_retry_does_not_retry_non_retryable_errors() 
     // Test a transaction that:
     //
     // Fails with a non-retryable error. It should exit immediately.
-    assert_eq!(conn.transaction_depth().await.unwrap(), 0);
+    assert_eq!(conn.transaction_depth().unwrap(), 0);
     assert_eq!(
         conn.transaction_async_with_retry(
             |_| async { Err::<(), _>(diesel::result::Error::NotFound) },
@@ -324,7 +423,7 @@ async fn test_transaction_automatic_retry_does_not_retry_non_retryable_errors() 
         .expect_err("Transaction should have failed"),
         diesel::result::Error::NotFound,
     );
-    assert_eq!(conn.transaction_depth().await.unwrap(), 0);
+    assert_eq!(conn.transaction_depth().unwrap(), 0);
 
     test_end(crdb).await;
 }
@@ -341,7 +440,7 @@ async fn test_transaction_automatic_retry_nested_transactions_fail() {
     struct OnlyReturnFromOuterTransaction {}
 
     // This outer transaction should succeed immediately...
-    assert_eq!(conn.transaction_depth().await.unwrap(), 0);
+    assert_eq!(conn.transaction_depth().unwrap(), 0);
     assert_eq!(
         OnlyReturnFromOuterTransaction {},
         conn.transaction_async_with_retry(
@@ -372,7 +471,7 @@ async fn test_transaction_automatic_retry_nested_transactions_fail() {
         .await
         .expect("Transaction should have succeeded")
     );
-    assert_eq!(conn.transaction_depth().await.unwrap(), 0);
+    assert_eq!(conn.transaction_depth().unwrap(), 0);
 
     test_end(crdb).await;
 }
