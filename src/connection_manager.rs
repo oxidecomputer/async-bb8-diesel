@@ -1,7 +1,6 @@
 //! An async-safe connection pool for Diesel.
 
 use crate::{Connection, ConnectionError};
-use async_trait::async_trait;
 use diesel::r2d2::{self, ManageConnection, R2D2Connection};
 use std::sync::{Arc, Mutex};
 
@@ -59,7 +58,6 @@ impl<T: Send + 'static> ConnectionManager<T> {
     }
 }
 
-#[async_trait]
 impl<T> bb8::ManageConnection for ConnectionManager<T>
 where
     T: R2D2Connection + Send + 'static,
