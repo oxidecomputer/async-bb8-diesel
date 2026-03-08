@@ -1,7 +1,10 @@
 //! An async wrapper around a [`diesel::Connection`].
 
+use crate::async_traits::AsyncConnection;
 use async_trait::async_trait;
 use diesel::r2d2::R2D2Connection;
+use diesel::result::Error as DieselError;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::task;
 
@@ -13,11 +16,27 @@ use tokio::task;
 /// All blocking methods within this type delegate to
 /// [`tokio::task::spawn_blocking`], meaning they won't block
 /// any asynchronous work or threads.
-pub struct Connection<C>(pub(crate) Arc<Mutex<C>>);
+pub struct Connection<C>(Arc<ConnectionInner<C>>);
+
+pub struct ConnectionInner<C> {
+    pub(crate) inner: Mutex<C>,
+    pub(crate) broken: AtomicBool,
+}
 
 impl<C> Connection<C> {
     pub fn new(c: C) -> Self {
-        Self(Arc::new(Mutex::new(c)))
+        Self(Arc::new(ConnectionInner {
+            inner: Mutex::new(c),
+            broken: AtomicBool::new(false),
+        }))
+    }
+
+    pub(crate) fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+
+    pub(crate) fn mark_broken(&self) {
+        self.0.broken.store(true, Ordering::SeqCst);
     }
 
     // Accesses the underlying connection.
@@ -25,7 +44,7 @@ impl<C> Connection<C> {
     // As this is a blocking mutex, it's recommended to avoid invoking
     // this function from an asynchronous context.
     pub(crate) fn inner(&self) -> MutexGuard<'_, C> {
-        self.0.lock().unwrap()
+        self.0.inner.lock().unwrap()
     }
 }
 
@@ -36,7 +55,11 @@ where
 {
     #[inline]
     async fn batch_execute_async(&self, query: &str) -> Result<(), diesel::result::Error> {
-        let diesel_conn = Connection(self.0.clone());
+        if self.is_broken_from_txn() {
+            return Err(DieselError::BrokenTransactionManager);
+        }
+
+        let diesel_conn = self.clone();
         let query = query.to_string();
         task::spawn_blocking(move || diesel_conn.inner().batch_execute(&query))
             .await
@@ -55,7 +78,7 @@ where
     Connection<Conn>: crate::AsyncSimpleConnection<Conn>,
 {
     fn get_owned_connection(&self) -> Self {
-        Connection(self.0.clone())
+        self.clone()
     }
 
     // Accesses the connection synchronously, protected by a mutex.
@@ -67,5 +90,9 @@ where
 
     fn as_async_conn(&self) -> &Connection<Conn> {
         self
+    }
+
+    fn is_broken_from_txn(&self) -> bool {
+        self.0.broken.load(Ordering::SeqCst)
     }
 }
