@@ -94,6 +94,20 @@ async fn test_insert_load_update_delete() {
     // Load
     let users = dsl::user.get_results_async::<User>(&*conn).await.unwrap();
     assert_eq!(users.len(), 2);
+    let users = dsl::user.load_async::<User>(&*conn).await.unwrap();
+    assert_eq!(users.len(), 2);
+    let user = dsl::user
+        .filter(dsl::id.eq(1))
+        .get_result_async::<User>(&*conn)
+        .await
+        .unwrap();
+    assert_eq!(user.name, "Xiang");
+    let user = dsl::user
+        .order(dsl::id)
+        .first_async::<User>(&*conn)
+        .await
+        .unwrap();
+    assert_eq!(user.name, "Jim");
 
     // Update
     let _ = diesel::update(dsl::user)

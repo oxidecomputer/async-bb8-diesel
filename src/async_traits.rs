@@ -18,21 +18,55 @@ use diesel::{
 use futures::future::BoxFuture;
 use futures::future::FutureExt;
 use std::any::Any;
+use std::borrow::Borrow;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::MutexGuard;
 use tokio::task::spawn_blocking;
 
-/// Type-erased version of [`spawn_blocking`].
+/// A closure to run against a connection, with its output type erased.
+type ErasedFn<Conn> = Box<dyn FnOnce(&mut Conn) -> Box<dyn Any + Send> + Send + 'static>;
+
+/// Erases the output type of `f`.
+fn erase<Conn, R, E, Func>(f: Func) -> ErasedFn<Conn>
+where
+    R: Send + 'static,
+    E: Send + 'static,
+    Func: FnOnce(&mut Conn) -> Result<R, E> + Send + 'static,
+{
+    Box::new(move |conn| Box::new(f(conn)) as Box<dyn Any + Send>)
+}
+
+/// Runs `f` against `conn` in a context where blocking is safe.
 ///
-/// This avoids monomorphization of Tokio's `spawn_blocking` machinery to make
-/// compile times much faster.
+/// This is not generic over the closure being run, nor over its output. This
+/// avoids monomorphization of this function, and of Tokio's `spawn_blocking`
+/// machinery, for each query, which makes compile times much faster.
+///
+/// `conn` is either a connection or an `Arc` of one.
 ///
 /// If `f` panics, this function panics as well.
-async fn spawn_blocking_erased(
-    f: Box<dyn FnOnce() -> Box<dyn Any + Send> + Send + 'static>,
-) -> Box<dyn Any + Send> {
-    spawn_blocking(f).await.unwrap() // Propagate panics
+async fn run_erased<B, C, Conn>(conn: B, f: ErasedFn<Conn>) -> Box<dyn Any + Send>
+where
+    B: Borrow<C> + Send + 'static,
+    C: AsyncConnection<Conn>,
+    Conn: 'static + DieselConnection,
+{
+    spawn_blocking(move || f(&mut *conn.borrow().as_sync_conn()))
+        .await
+        .unwrap() // Propagate panics
+}
+
+/// Recovers the output type which was erased by [`erase`].
+async fn downcast_output<R, E>(output: impl Future<Output = Box<dyn Any + Send>>) -> Result<R, E>
+where
+    R: 'static,
+    E: 'static,
+{
+    *output.await.downcast::<Result<R, E>>().expect(
+        "erased output has the expected type \
+         (this is a bug in async-bb8-diesel)",
+    )
 }
 
 /// An async variant of [`diesel::connection::SimpleConnection`].
@@ -87,49 +121,42 @@ where
     fn as_async_conn(&self) -> &Connection<Conn>;
 
     /// Runs the function `f` in an context where blocking is safe.
-    async fn run<R, E, Func>(&self, f: Func) -> Result<R, E>
+    //
+    // This function, and the "run_with" functions below, are instantiated for
+    // each closure they're called with. They aren't "async fn"s to avoid also
+    // instantiating a future for each closure: the future they return is only
+    // generic over the output of the closure.
+    fn run<R, E, Func>(&self, f: Func) -> BoxFuture<'_, Result<R, E>>
     where
         R: Send + 'static,
         E: Send + 'static,
         Func: FnOnce(&mut Conn) -> Result<R, E> + Send + 'static,
     {
-        let connection = self.get_owned_connection();
-        connection.run_with_connection(f).await
+        self.get_owned_connection().run_with_connection(f)
     }
 
     #[doc(hidden)]
-    async fn run_with_connection<R, E, Func>(self, f: Func) -> Result<R, E>
+    fn run_with_connection<R, E, Func>(self, f: Func) -> BoxFuture<'static, Result<R, E>>
     where
         R: Send + 'static,
         E: Send + 'static,
         Func: FnOnce(&mut Conn) -> Result<R, E> + Send + 'static,
     {
-        let out = spawn_blocking_erased(Box::new(move || {
-            Box::new(f(&mut *self.as_sync_conn())) as Box<dyn Any + Send>
-        }))
-        .await;
-        *out.downcast::<Result<R, E>>().expect(
-            "erased output has the expected type \
-             (this is a bug in async-bb8-diesel)",
-        )
+        downcast_output(run_erased::<Self, Self, Conn>(self, erase(f))).boxed()
     }
 
     #[doc(hidden)]
-    async fn run_with_shared_connection<R, E, Func>(self: &Arc<Self>, f: Func) -> Result<R, E>
+    fn run_with_shared_connection<R, E, Func>(
+        self: &Arc<Self>,
+        f: Func,
+    ) -> BoxFuture<'static, Result<R, E>>
     where
         R: Send + 'static,
         E: Send + 'static,
         Func: FnOnce(&mut Conn) -> Result<R, E> + Send + 'static,
+        Self: Sync,
     {
-        let conn = self.clone();
-        let out = spawn_blocking_erased(Box::new(move || {
-            Box::new(f(&mut *conn.as_sync_conn())) as Box<dyn Any + Send>
-        }))
-        .await;
-        *out.downcast::<Result<R, E>>().expect(
-            "erased output has the expected type \
-             (this is a bug in async-bb8-diesel)",
-        )
+        downcast_output(run_erased::<Arc<Self>, Self, Conn>(self.clone(), erase(f))).boxed()
     }
 
     #[doc(hidden)]
@@ -415,109 +442,111 @@ where
 }
 
 /// An async variant of [`diesel::query_dsl::RunQueryDsl`].
-#[async_trait]
 pub trait AsyncRunQueryDsl<Conn, AsyncConn>
 where
     Conn: 'static + DieselConnection,
 {
-    async fn execute_async(self, asc: &AsyncConn) -> Result<usize, DieselError>
+    fn execute_async(self, asc: &AsyncConn) -> BoxFuture<'_, Result<usize, DieselError>>
     where
         Self: ExecuteDsl<Conn>;
 
-    async fn load_async<U>(self, asc: &AsyncConn) -> Result<Vec<U>, DieselError>
+    fn load_async<U>(self, asc: &AsyncConn) -> BoxFuture<'_, Result<Vec<U>, DieselError>>
     where
         U: Send + 'static,
         Self: LoadQuery<'static, Conn, U>;
 
-    async fn get_result_async<U>(self, asc: &AsyncConn) -> Result<U, DieselError>
+    fn get_result_async<U>(self, asc: &AsyncConn) -> BoxFuture<'_, Result<U, DieselError>>
     where
         U: Send + 'static,
         Self: LoadQuery<'static, Conn, U>;
 
-    async fn get_results_async<U>(self, asc: &AsyncConn) -> Result<Vec<U>, DieselError>
+    fn get_results_async<U>(self, asc: &AsyncConn) -> BoxFuture<'_, Result<Vec<U>, DieselError>>
     where
         U: Send + 'static,
         Self: LoadQuery<'static, Conn, U>;
 
-    async fn first_async<U>(self, asc: &AsyncConn) -> Result<U, DieselError>
+    fn first_async<U>(self, asc: &AsyncConn) -> BoxFuture<'_, Result<U, DieselError>>
     where
         U: Send + 'static,
         Self: LimitDsl,
         Limit<Self>: LoadQuery<'static, Conn, U>;
 }
 
-#[async_trait]
 impl<T, AsyncConn, Conn> AsyncRunQueryDsl<Conn, AsyncConn> for T
 where
     T: 'static + Send + RunQueryDsl<Conn>,
     Conn: 'static + DieselConnection,
     AsyncConn: Send + Sync + AsyncConnection<Conn>,
 {
-    async fn execute_async(self, asc: &AsyncConn) -> Result<usize, DieselError>
+    fn execute_async(self, asc: &AsyncConn) -> BoxFuture<'_, Result<usize, DieselError>>
     where
         Self: ExecuteDsl<Conn>,
     {
-        asc.run(|conn| self.execute(conn)).await
+        asc.run(|conn| self.execute(conn))
     }
 
-    async fn load_async<U>(self, asc: &AsyncConn) -> Result<Vec<U>, DieselError>
+    fn load_async<U>(self, asc: &AsyncConn) -> BoxFuture<'_, Result<Vec<U>, DieselError>>
     where
         U: Send + 'static,
         Self: LoadQuery<'static, Conn, U>,
     {
-        asc.run(|conn| self.load(conn)).await
+        asc.run(|conn| self.load(conn))
     }
 
-    async fn get_result_async<U>(self, asc: &AsyncConn) -> Result<U, DieselError>
+    fn get_result_async<U>(self, asc: &AsyncConn) -> BoxFuture<'_, Result<U, DieselError>>
     where
         U: Send + 'static,
         Self: LoadQuery<'static, Conn, U>,
     {
-        asc.run(|conn| self.get_result(conn)).await
+        asc.run(|conn| self.get_result(conn))
     }
 
-    async fn get_results_async<U>(self, asc: &AsyncConn) -> Result<Vec<U>, DieselError>
+    fn get_results_async<U>(self, asc: &AsyncConn) -> BoxFuture<'_, Result<Vec<U>, DieselError>>
     where
         U: Send + 'static,
         Self: LoadQuery<'static, Conn, U>,
     {
-        asc.run(|conn| self.get_results(conn)).await
+        asc.run(|conn| self.get_results(conn))
     }
 
-    async fn first_async<U>(self, asc: &AsyncConn) -> Result<U, DieselError>
+    fn first_async<U>(self, asc: &AsyncConn) -> BoxFuture<'_, Result<U, DieselError>>
     where
         U: Send + 'static,
         Self: LimitDsl,
         Limit<Self>: LoadQuery<'static, Conn, U>,
     {
-        asc.run(|conn| self.first(conn)).await
+        asc.run(|conn| self.first(conn))
     }
 }
 
-#[async_trait]
 pub trait AsyncSaveChangesDsl<Conn, AsyncConn>
 where
     Conn: 'static + DieselConnection,
 {
-    async fn save_changes_async<Output>(self, asc: &AsyncConn) -> Result<Output, DieselError>
+    fn save_changes_async<Output>(
+        self,
+        asc: &AsyncConn,
+    ) -> BoxFuture<'_, Result<Output, DieselError>>
     where
         Self: Sized,
         Conn: diesel::query_dsl::UpdateAndFetchResults<Self, Output>,
         Output: Send + 'static;
 }
 
-#[async_trait]
 impl<T, AsyncConn, Conn> AsyncSaveChangesDsl<Conn, AsyncConn> for T
 where
     T: 'static + Send + Sync + diesel::SaveChangesDsl<Conn>,
     Conn: 'static + DieselConnection,
     AsyncConn: Send + Sync + AsyncConnection<Conn>,
 {
-    async fn save_changes_async<Output>(self, asc: &AsyncConn) -> Result<Output, DieselError>
+    fn save_changes_async<Output>(
+        self,
+        asc: &AsyncConn,
+    ) -> BoxFuture<'_, Result<Output, DieselError>>
     where
         Conn: diesel::query_dsl::UpdateAndFetchResults<Self, Output>,
         Output: Send + 'static,
     {
-        asc.run(|conn| self.save_changes(conn)).await
+        asc.run(|conn| self.save_changes(conn))
     }
 }
