@@ -23,6 +23,18 @@ use std::sync::Arc;
 use std::sync::MutexGuard;
 use tokio::task::spawn_blocking;
 
+/// Type-erased version of [`spawn_blocking`].
+///
+/// This avoids monomorphization of Tokio's `spawn_blocking` machinery to make
+/// compile times much faster.
+///
+/// If `f` panics, this function panics as well.
+async fn spawn_blocking_erased(
+    f: Box<dyn FnOnce() -> Box<dyn Any + Send> + Send + 'static>,
+) -> Box<dyn Any + Send> {
+    spawn_blocking(f).await.unwrap() // Propagate panics
+}
+
 /// An async variant of [`diesel::connection::SimpleConnection`].
 #[async_trait]
 pub trait AsyncSimpleConnection<Conn>
@@ -92,9 +104,14 @@ where
         E: Send + 'static,
         Func: FnOnce(&mut Conn) -> Result<R, E> + Send + 'static,
     {
-        spawn_blocking(move || f(&mut *self.as_sync_conn()))
-            .await
-            .unwrap() // Propagate panics
+        let out = spawn_blocking_erased(Box::new(move || {
+            Box::new(f(&mut *self.as_sync_conn())) as Box<dyn Any + Send>
+        }))
+        .await;
+        *out.downcast::<Result<R, E>>().expect(
+            "erased output has the expected type \
+             (this is a bug in async-bb8-diesel)",
+        )
     }
 
     #[doc(hidden)]
@@ -105,9 +122,14 @@ where
         Func: FnOnce(&mut Conn) -> Result<R, E> + Send + 'static,
     {
         let conn = self.clone();
-        spawn_blocking(move || f(&mut *conn.as_sync_conn()))
-            .await
-            .unwrap() // Propagate panics
+        let out = spawn_blocking_erased(Box::new(move || {
+            Box::new(f(&mut *conn.as_sync_conn())) as Box<dyn Any + Send>
+        }))
+        .await;
+        *out.downcast::<Result<R, E>>().expect(
+            "erased output has the expected type \
+             (this is a bug in async-bb8-diesel)",
+        )
     }
 
     #[doc(hidden)]
