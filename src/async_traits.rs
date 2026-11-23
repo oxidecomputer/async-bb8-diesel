@@ -18,55 +18,41 @@ use diesel::{
 use futures::future::BoxFuture;
 use futures::future::FutureExt;
 use std::any::Any;
-use std::borrow::Borrow;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::MutexGuard;
 use tokio::task::spawn_blocking;
 
-/// A closure to run against a connection, with its output type erased.
-type ErasedFn<Conn> = Box<dyn FnOnce(&mut Conn) -> Box<dyn Any + Send> + Send + 'static>;
-
-/// Erases the output type of `f`.
-fn erase<Conn, R, E, Func>(f: Func) -> ErasedFn<Conn>
-where
-    R: Send + 'static,
-    E: Send + 'static,
-    Func: FnOnce(&mut Conn) -> Result<R, E> + Send + 'static,
-{
-    Box::new(move |conn| Box::new(f(conn)) as Box<dyn Any + Send>)
-}
-
-/// Runs `f` against `conn` in a context where blocking is safe.
+/// Type-erased version of [`spawn_blocking`].
 ///
-/// This is not generic over the closure being run, nor over its output. This
-/// avoids monomorphization of this function, and of Tokio's `spawn_blocking`
-/// machinery, for each query, which makes compile times much faster.
-///
-/// `conn` is either a connection or an `Arc` of one.
+/// This avoids monomorphization of Tokio's `spawn_blocking` machinery to make
+/// compile times much faster.
 ///
 /// If `f` panics, this function panics as well.
-async fn run_erased<B, C, Conn>(conn: B, f: ErasedFn<Conn>) -> Box<dyn Any + Send>
-where
-    B: Borrow<C> + Send + 'static,
-    C: AsyncConnection<Conn>,
-    Conn: 'static + DieselConnection,
-{
-    spawn_blocking(move || f(&mut *conn.borrow().as_sync_conn()))
-        .await
-        .unwrap() // Propagate panics
+async fn spawn_blocking_erased(
+    f: Box<dyn FnOnce() -> Box<dyn Any + Send> + Send + 'static>,
+) -> Box<dyn Any + Send> {
+    spawn_blocking(f).await.unwrap() // Propagate panics
 }
 
-/// Recovers the output type which was erased by [`erase`].
-async fn downcast_output<R, E>(output: impl Future<Output = Box<dyn Any + Send>>) -> Result<R, E>
+/// Calls [`spawn_blocking_erased`], and recovers the type of the output.
+///
+/// This is generic over the output of `f`, but not over `f` itself. A future
+/// is instantiated for each type of output, rather than for each closure.
+async fn spawn_blocking_downcast<R, E>(
+    f: Box<dyn FnOnce() -> Box<dyn Any + Send> + Send + 'static>,
+) -> Result<R, E>
 where
     R: 'static,
     E: 'static,
 {
-    *output.await.downcast::<Result<R, E>>().expect(
-        "erased output has the expected type \
-         (this is a bug in async-bb8-diesel)",
-    )
+    *spawn_blocking_erased(f)
+        .await
+        .downcast::<Result<R, E>>()
+        .expect(
+            "erased output has the expected type \
+             (this is a bug in async-bb8-diesel)",
+        )
 }
 
 /// An async variant of [`diesel::connection::SimpleConnection`].
@@ -142,7 +128,10 @@ where
         E: Send + 'static,
         Func: FnOnce(&mut Conn) -> Result<R, E> + Send + 'static,
     {
-        downcast_output(run_erased::<Self, Self, Conn>(self, erase(f))).boxed()
+        spawn_blocking_downcast(Box::new(move || {
+            Box::new(f(&mut *self.as_sync_conn())) as Box<dyn Any + Send>
+        }))
+        .boxed()
     }
 
     #[doc(hidden)]
@@ -156,7 +145,11 @@ where
         Func: FnOnce(&mut Conn) -> Result<R, E> + Send + 'static,
         Self: Sync,
     {
-        downcast_output(run_erased::<Arc<Self>, Self, Conn>(self.clone(), erase(f))).boxed()
+        let conn = self.clone();
+        spawn_blocking_downcast(Box::new(move || {
+            Box::new(f(&mut *conn.as_sync_conn())) as Box<dyn Any + Send>
+        }))
+        .boxed()
     }
 
     #[doc(hidden)]
