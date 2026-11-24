@@ -15,7 +15,6 @@ default = [ "cockroach" ]
 
 [dependencies]
 bb8 = "0.9"
-async-trait = "0.1.89"
 diesel = { version = "2.3.5", default-features = false, features = [ "r2d2" ] }
 futures = "0.3"
 thiserror = "2.0"

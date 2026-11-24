@@ -1,7 +1,6 @@
 //! Async versions of traits for issuing Diesel queries.
 
 use crate::connection::Connection;
-use async_trait::async_trait;
 use diesel::{
     connection::{
         Connection as DieselConnection, SimpleConnection, TransactionManager,
@@ -56,12 +55,11 @@ where
 }
 
 /// An async variant of [`diesel::connection::SimpleConnection`].
-#[async_trait]
 pub trait AsyncSimpleConnection<Conn>
 where
     Conn: 'static + SimpleConnection,
 {
-    async fn batch_execute_async(&self, query: &str) -> Result<(), DieselError>;
+    fn batch_execute_async<'a>(&'a self, query: &'a str) -> BoxFuture<'a, Result<(), DieselError>>;
 }
 
 #[cfg(feature = "cockroach")]
@@ -74,26 +72,33 @@ fn retryable_error(err: &DieselError) -> bool {
 }
 
 /// An async variant of [`diesel::r2d2::R2D2Connection`].
-#[async_trait]
 pub trait AsyncR2D2Connection<Conn>: AsyncConnection<Conn>
 where
     Conn: 'static + DieselConnection + R2D2Connection,
     Self: Send + Sized + 'static,
 {
-    async fn ping_async(&mut self) -> diesel::result::QueryResult<()> {
-        self.as_async_conn().run(|conn| conn.ping()).await
+    fn ping_async(&mut self) -> BoxFuture<'_, diesel::result::QueryResult<()>> {
+        self.as_async_conn().run(|conn| conn.ping())
     }
 
-    async fn is_broken_async(&mut self) -> bool {
-        self.as_async_conn()
-            .run(|conn| Ok::<bool, ()>(conn.is_broken()))
-            .await
-            .unwrap()
+    fn is_broken_async(&mut self) -> BoxFuture<'_, bool> {
+        async move {
+            self.as_async_conn()
+                .run(|conn| Ok::<bool, ()>(conn.is_broken()))
+                .await
+                .unwrap()
+        }
+        .boxed()
     }
 }
 
 /// An async variant of [`diesel::connection::Connection`].
-#[async_trait]
+//
+// The public methods of this trait return a `BoxFuture`, rather than an
+// `impl Future`, so that callers get a future which is `Unpin`, and which is
+// known to be `Send` regardless of what the caller is generic over. The
+// hidden helpers which are only awaited within this crate don't need either,
+// and aren't boxed.
 pub trait AsyncConnection<Conn>: AsyncSimpleConnection<Conn>
 where
     Conn: 'static + DieselConnection,
@@ -153,7 +158,7 @@ where
     }
 
     #[doc(hidden)]
-    async fn transaction_depth(&self) -> Result<u32, DieselError> {
+    fn transaction_depth(&self) -> BoxFuture<'static, Result<u32, DieselError>> {
         let conn = self.get_owned_connection();
 
         Self::run_with_connection(conn, |conn| {
@@ -164,7 +169,6 @@ where
                 TransactionManagerStatus::InError => Err(DieselError::BrokenTransactionManager),
             }
         })
-        .await
     }
 
     // Diesel's "begin_transaction" chooses whether to issue "BEGIN" or a
@@ -173,13 +177,20 @@ where
     // This method is a wrapper around that call, with validation that
     // we're actually issuing the BEGIN statement here.
     #[doc(hidden)]
-    async fn start_transaction(self: &Arc<Self>) -> Result<(), DieselError> {
-        if self.transaction_depth().await? != 0 {
-            return Err(DieselError::AlreadyInTransaction);
-        }
-        self.run_with_shared_connection(|conn| Conn::TransactionManager::begin_transaction(conn))
+    fn start_transaction(self: &Arc<Self>) -> impl Future<Output = Result<(), DieselError>> + Send
+    where
+        Self: Sync,
+    {
+        async move {
+            if self.transaction_depth().await? != 0 {
+                return Err(DieselError::AlreadyInTransaction);
+            }
+            self.run_with_shared_connection(|conn| {
+                Conn::TransactionManager::begin_transaction(conn)
+            })
             .await?;
-        Ok(())
+            Ok(())
+        }
     }
 
     // Diesel's "begin_transaction" chooses whether to issue "BEGIN" or a
@@ -188,32 +199,53 @@ where
     // This method is a wrapper around that call, with validation that
     // we're actually issuing our first SAVEPOINT here.
     #[doc(hidden)]
-    async fn add_retry_savepoint(self: &Arc<Self>) -> Result<(), DieselError> {
-        match self.transaction_depth().await? {
-            0 => return Err(DieselError::NotInTransaction),
-            1 => (),
-            _ => return Err(DieselError::AlreadyInTransaction),
-        };
+    fn add_retry_savepoint(self: &Arc<Self>) -> impl Future<Output = Result<(), DieselError>> + Send
+    where
+        Self: Sync,
+    {
+        async move {
+            match self.transaction_depth().await? {
+                0 => return Err(DieselError::NotInTransaction),
+                1 => (),
+                _ => return Err(DieselError::AlreadyInTransaction),
+            };
 
-        self.run_with_shared_connection(|conn| Conn::TransactionManager::begin_transaction(conn))
+            self.run_with_shared_connection(|conn| {
+                Conn::TransactionManager::begin_transaction(conn)
+            })
             .await?;
-        Ok(())
+            Ok(())
+        }
     }
 
     #[doc(hidden)]
-    async fn commit_transaction(self: &Arc<Self>) -> Result<(), DieselError> {
-        self.run_with_shared_connection(|conn| Conn::TransactionManager::commit_transaction(conn))
+    fn commit_transaction(self: &Arc<Self>) -> impl Future<Output = Result<(), DieselError>> + Send
+    where
+        Self: Sync,
+    {
+        async move {
+            self.run_with_shared_connection(|conn| {
+                Conn::TransactionManager::commit_transaction(conn)
+            })
             .await?;
-        Ok(())
+            Ok(())
+        }
     }
 
     #[doc(hidden)]
-    async fn rollback_transaction(self: &Arc<Self>) -> Result<(), DieselError> {
-        self.run_with_shared_connection(|conn| {
-            Conn::TransactionManager::rollback_transaction(conn)
-        })
-        .await?;
-        Ok(())
+    fn rollback_transaction(
+        self: &Arc<Self>,
+    ) -> impl Future<Output = Result<(), DieselError>> + Send
+    where
+        Self: Sync,
+    {
+        async move {
+            self.run_with_shared_connection(|conn| {
+                Conn::TransactionManager::rollback_transaction(conn)
+            })
+            .await?;
+            Ok(())
+        }
     }
 
     /// Issues a function `f` as a transaction.
@@ -223,214 +255,236 @@ where
     /// This function throws an error if it is called from within an existing
     /// transaction.
     #[cfg(feature = "cockroach")]
-    async fn transaction_async_with_retry<R, Func, Fut, RetryFut, RetryFunc, 'a>(
+    fn transaction_async_with_retry<'a, R, Func, Fut, RetryFut, RetryFunc>(
         &'a self,
         f: Func,
         retry: RetryFunc,
-    ) -> Result<R, DieselError>
+    ) -> BoxFuture<'a, Result<R, DieselError>>
     where
         R: Any + Send + 'static,
-        Fut: FutureExt<Output = Result<R, DieselError>> + Send,
-        Func: (Fn(Connection<Conn>) -> Fut) + Send + Sync,
-        RetryFut: FutureExt<Output = bool> + Send,
-        RetryFunc: Fn() -> RetryFut + Send + Sync,
+        Fut: FutureExt<Output = Result<R, DieselError>> + Send + 'a,
+        Func: (Fn(Connection<Conn>) -> Fut) + Send + Sync + 'a,
+        RetryFut: FutureExt<Output = bool> + Send + 'a,
+        RetryFunc: Fn() -> RetryFut + Send + Sync + 'a,
+        Self: Sync,
     {
-        // This function sure has a bunch of generic parameters, which can cause
-        // a lot of code to be generated, and can slow down compile-time.
-        //
-        // This API intends to provide a convenient, generic, shim over the
-        // dynamic "transaction_async_with_retry_inner" function below, which
-        // should avoid being generic. The goal here is to instantiate only one
-        // significant "body" of this function, while retaining flexibility for
-        // clients using this library.
+        async move {
+            // This function sure has a bunch of generic parameters, which can cause
+            // a lot of code to be generated, and can slow down compile-time.
+            //
+            // This API intends to provide a convenient, generic, shim over the
+            // dynamic "transaction_async_with_retry_inner" function below, which
+            // should avoid being generic. The goal here is to instantiate only one
+            // significant "body" of this function, while retaining flexibility for
+            // clients using this library.
 
-        // Box the functions, and box the return value.
-        let f = |conn| {
-            f(conn)
-                .map(|result| result.map(|r| Box::new(r) as Box<dyn Any + Send>))
-                .boxed()
-        };
-        let retry = || retry().boxed();
+            // Box the functions, and box the return value.
+            let f = |conn| {
+                f(conn)
+                    .map(|result| result.map(|r| Box::new(r) as Box<dyn Any + Send>))
+                    .boxed()
+            };
+            let retry = || retry().boxed();
 
-        // Call the dynamically dispatched function, then retrieve the return
-        // value out of a Box.
-        self.transaction_async_with_retry_inner(&f, &retry)
-            .await
-            .map(|v| *v.downcast::<R>().expect("Should be an 'R' type"))
+            // Call the dynamically dispatched function, then retrieve the return
+            // value out of a Box.
+            self.transaction_async_with_retry_inner(&f, &retry)
+                .await
+                .map(|v| *v.downcast::<R>().expect("Should be an 'R' type"))
+        }
+        .boxed()
     }
 
     // NOTE: This function intentionally avoids all generics!
     #[cfg(feature = "cockroach")]
-    async fn transaction_async_with_retry_inner(
-        &self,
-        f: &(dyn Fn(Connection<Conn>) -> BoxFuture<'_, Result<Box<dyn Any + Send>, DieselError>>
-              + Send
-              + Sync),
-        retry: &(dyn Fn() -> BoxFuture<'_, bool> + Send + Sync),
-    ) -> Result<Box<dyn Any + Send>, DieselError> {
-        // Check out a connection once, and use it for the duration of the
-        // operation.
-        let conn = Arc::new(self.get_owned_connection());
+    #[allow(clippy::type_complexity)]
+    fn transaction_async_with_retry_inner<'a, 'f, 'r>(
+        &'a self,
+        f: &'a (dyn Fn(Connection<Conn>) -> BoxFuture<'f, Result<Box<dyn Any + Send>, DieselError>>
+                 + Send
+                 + Sync),
+        retry: &'a (dyn Fn() -> BoxFuture<'r, bool> + Send + Sync),
+    ) -> BoxFuture<'a, Result<Box<dyn Any + Send>, DieselError>>
+    where
+        'f: 'a,
+        'r: 'a,
+        Self: Sync,
+    {
+        async move {
+            // Check out a connection once, and use it for the duration of the
+            // operation.
+            let conn = Arc::new(self.get_owned_connection());
 
-        // Refer to CockroachDB's guide on advanced client-side transaction
-        // retries for the full context:
-        // https://www.cockroachlabs.com/docs/v23.1/advanced-client-side-transaction-retries
-        //
-        // In short, they expect a particular name for this savepoint, but
-        // Diesel has Opinions on savepoint names, so we use this session
-        // variable to identify that any name is valid.
-        //
-        // TODO: It may be preferable to set this once per connection -- but
-        // that'll require more interaction with how sessions with the database
-        // are constructed.
-        Self::start_transaction(&conn).await?;
-        conn.run_with_shared_connection(|conn| {
-            conn.batch_execute("SET LOCAL force_savepoint_restart = true")
-        })
-        .await?;
+            // Refer to CockroachDB's guide on advanced client-side transaction
+            // retries for the full context:
+            // https://www.cockroachlabs.com/docs/v23.1/advanced-client-side-transaction-retries
+            //
+            // In short, they expect a particular name for this savepoint, but
+            // Diesel has Opinions on savepoint names, so we use this session
+            // variable to identify that any name is valid.
+            //
+            // TODO: It may be preferable to set this once per connection -- but
+            // that'll require more interaction with how sessions with the database
+            // are constructed.
+            Self::start_transaction(&conn).await?;
+            conn.run_with_shared_connection(|conn| {
+                conn.batch_execute("SET LOCAL force_savepoint_restart = true")
+            })
+            .await?;
 
-        loop {
-            // Add a SAVEPOINT to which we can later return.
-            Self::add_retry_savepoint(&conn).await?;
+            loop {
+                // Add a SAVEPOINT to which we can later return.
+                Self::add_retry_savepoint(&conn).await?;
 
-            let async_conn = Connection(Self::as_async_conn(&conn).0.clone());
-            match f(async_conn).await {
-                Ok(value) => {
-                    // The user-level operation succeeded: try to commit the
-                    // transaction by RELEASE-ing the retry savepoint.
-                    if let Err(err) = Self::commit_transaction(&conn).await {
-                        // Diesel's implementation of "commit_transaction"
-                        // calls "rollback_transaction" in the error path.
-                        //
-                        // We're still in the transaction, but we at least
-                        // tried to ROLLBACK to our savepoint.
-                        if !retryable_error(&err) || !retry().await {
-                            // Bail: ROLLBACK the initial BEGIN statement too.
-                            let _ = Self::rollback_transaction(&conn).await;
-                            return Err(err);
+                let async_conn = Connection(Self::as_async_conn(&conn).0.clone());
+                match f(async_conn).await {
+                    Ok(value) => {
+                        // The user-level operation succeeded: try to commit the
+                        // transaction by RELEASE-ing the retry savepoint.
+                        if let Err(err) = Self::commit_transaction(&conn).await {
+                            // Diesel's implementation of "commit_transaction"
+                            // calls "rollback_transaction" in the error path.
+                            //
+                            // We're still in the transaction, but we at least
+                            // tried to ROLLBACK to our savepoint.
+                            if !retryable_error(&err) || !retry().await {
+                                // Bail: ROLLBACK the initial BEGIN statement too.
+                                let _ = Self::rollback_transaction(&conn).await;
+                                return Err(err);
+                            }
+                            // ROLLBACK happened, we want to retry.
+                            continue;
                         }
-                        // ROLLBACK happened, we want to retry.
-                        continue;
-                    }
 
-                    // Commit the top-level transaction too.
-                    Self::commit_transaction(&conn).await?;
-                    return Ok(value);
-                }
-                Err(user_error) => {
-                    // The user-level operation failed: ROLLBACK to the retry
-                    // savepoint.
-                    if let Err(first_rollback_err) = Self::rollback_transaction(&conn).await {
-                        // If we fail while rolling back, prioritize returning
-                        // the ROLLBACK error over the user errors.
+                        // Commit the top-level transaction too.
+                        Self::commit_transaction(&conn).await?;
+                        return Ok(value);
+                    }
+                    Err(user_error) => {
+                        // The user-level operation failed: ROLLBACK to the retry
+                        // savepoint.
+                        if let Err(first_rollback_err) = Self::rollback_transaction(&conn).await {
+                            // If we fail while rolling back, prioritize returning
+                            // the ROLLBACK error over the user errors.
+                            return match Self::rollback_transaction(&conn).await {
+                                Ok(()) => Err(first_rollback_err),
+                                Err(second_rollback_err) => Err(second_rollback_err),
+                            };
+                        }
+
+                        // We rolled back to the retry savepoint, and now want to
+                        // retry.
+                        if retryable_error(&user_error) && retry().await {
+                            continue;
+                        }
+
+                        // If we aren't retrying, ROLLBACK the BEGIN statement too.
                         return match Self::rollback_transaction(&conn).await {
-                            Ok(()) => Err(first_rollback_err),
-                            Err(second_rollback_err) => Err(second_rollback_err),
+                            Ok(()) => Err(user_error),
+                            Err(err) => Err(err),
                         };
                     }
-
-                    // We rolled back to the retry savepoint, and now want to
-                    // retry.
-                    if retryable_error(&user_error) && retry().await {
-                        continue;
-                    }
-
-                    // If we aren't retrying, ROLLBACK the BEGIN statement too.
-                    return match Self::rollback_transaction(&conn).await {
-                        Ok(()) => Err(user_error),
-                        Err(err) => Err(err),
-                    };
                 }
             }
         }
+        .boxed()
     }
 
-    async fn transaction_async<R, E, Func, Fut, 'a>(&'a self, f: Func) -> Result<R, E>
+    fn transaction_async<'a, R, E, Func, Fut>(&'a self, f: Func) -> BoxFuture<'a, Result<R, E>>
     where
         R: Send + 'static,
         E: From<DieselError> + Send + 'static,
-        Fut: Future<Output = Result<R, E>> + Send,
-        Func: FnOnce(Connection<Conn>) -> Fut + Send,
+        Fut: Future<Output = Result<R, E>> + Send + 'a,
+        Func: FnOnce(Connection<Conn>) -> Fut + Send + 'a,
+        Self: Sync,
     {
-        // This function sure has a bunch of generic parameters, which can cause
-        // a lot of code to be generated, and can slow down compile-time.
-        //
-        // This API intends to provide a convenient, generic, shim over the
-        // dynamic "transaction_async_with_retry_inner" function below, which
-        // should avoid being generic. The goal here is to instantiate only one
-        // significant "body" of this function, while retaining flexibility for
-        // clients using this library.
+        async move {
+            // This function sure has a bunch of generic parameters, which can cause
+            // a lot of code to be generated, and can slow down compile-time.
+            //
+            // This API intends to provide a convenient, generic, shim over the
+            // dynamic "transaction_async_with_retry_inner" function below, which
+            // should avoid being generic. The goal here is to instantiate only one
+            // significant "body" of this function, while retaining flexibility for
+            // clients using this library.
 
-        let f = Box::new(move |conn| {
-            f(conn)
-                .map(|result| result.map(|r| Box::new(r) as Box<dyn Any + Send>))
-                .boxed()
-        });
+            let f = Box::new(move |conn| {
+                f(conn)
+                    .map(|result| result.map(|r| Box::new(r) as Box<dyn Any + Send>))
+                    .boxed()
+            });
 
-        self.transaction_async_inner(f)
-            .await
-            .map(|v| *v.downcast::<R>().expect("Should be an 'R' type"))
+            self.transaction_async_inner(f)
+                .await
+                .map(|v| *v.downcast::<R>().expect("Should be an 'R' type"))
+        }
+        .boxed()
     }
 
     // NOTE: This function intentionally avoids as many generic parameters as possible
-    async fn transaction_async_inner<'a, E>(
+    #[allow(clippy::type_complexity)]
+    fn transaction_async_inner<'a, E>(
         &'a self,
         f: Box<
             dyn FnOnce(Connection<Conn>) -> BoxFuture<'a, Result<Box<dyn Any + Send>, E>>
                 + Send
                 + 'a,
         >,
-    ) -> Result<Box<dyn Any + Send>, E>
+    ) -> BoxFuture<'a, Result<Box<dyn Any + Send>, E>>
     where
         E: From<DieselError> + Send + 'static,
+        Self: Sync,
     {
-        // Check out a connection once, and use it for the duration of the
-        // operation.
-        let conn = Arc::new(self.get_owned_connection());
+        async move {
+            // Check out a connection once, and use it for the duration of the
+            // operation.
+            let conn = Arc::new(self.get_owned_connection());
 
-        // This function mimics the implementation of:
-        // https://docs.diesel.rs/master/diesel/connection/trait.TransactionManager.html#method.transaction
-        //
-        // However, it modifies all callsites to instead issue
-        // known-to-be-synchronous operations from an asynchronous context.
-        conn.run_with_shared_connection(|conn| {
-            Conn::TransactionManager::begin_transaction(conn).map_err(E::from)
-        })
-        .await?;
+            // This function mimics the implementation of:
+            // https://docs.diesel.rs/master/diesel/connection/trait.TransactionManager.html#method.transaction
+            //
+            // However, it modifies all callsites to instead issue
+            // known-to-be-synchronous operations from an asynchronous context.
+            conn.run_with_shared_connection(|conn| {
+                Conn::TransactionManager::begin_transaction(conn).map_err(E::from)
+            })
+            .await?;
 
-        // TODO: The ideal interface would pass the "async_conn" object to the
-        // underlying function "f" by reference.
-        //
-        // This would prevent the user-supplied closure + future from using the
-        // connection *beyond* the duration of the transaction, which would be
-        // bad.
-        //
-        // However, I'm struggling to get these lifetimes to work properly. If
-        // you can figure out a way to convince that the reference lives long
-        // enough to be referenceable by a Future, but short enough that we can
-        // guarantee it doesn't live persist after this function returns, feel
-        // free to make that change.
-        let async_conn = Connection(Self::as_async_conn(&conn).0.clone());
-        match f(async_conn).await {
-            Ok(value) => {
-                conn.run_with_shared_connection(|conn| {
-                    Conn::TransactionManager::commit_transaction(conn).map_err(E::from)
-                })
-                .await?;
-                Ok(value)
-            }
-            Err(user_error) => {
-                match conn
-                    .run_with_shared_connection(|conn| {
-                        Conn::TransactionManager::rollback_transaction(conn).map_err(E::from)
+            // TODO: The ideal interface would pass the "async_conn" object to the
+            // underlying function "f" by reference.
+            //
+            // This would prevent the user-supplied closure + future from using the
+            // connection *beyond* the duration of the transaction, which would be
+            // bad.
+            //
+            // However, I'm struggling to get these lifetimes to work properly. If
+            // you can figure out a way to convince that the reference lives long
+            // enough to be referenceable by a Future, but short enough that we can
+            // guarantee it doesn't live persist after this function returns, feel
+            // free to make that change.
+            let async_conn = Connection(Self::as_async_conn(&conn).0.clone());
+            match f(async_conn).await {
+                Ok(value) => {
+                    conn.run_with_shared_connection(|conn| {
+                        Conn::TransactionManager::commit_transaction(conn).map_err(E::from)
                     })
-                    .await
-                {
-                    Ok(()) => Err(user_error),
-                    Err(err) => Err(err),
+                    .await?;
+                    Ok(value)
+                }
+                Err(user_error) => {
+                    match conn
+                        .run_with_shared_connection(|conn| {
+                            Conn::TransactionManager::rollback_transaction(conn).map_err(E::from)
+                        })
+                        .await
+                    {
+                        Ok(()) => Err(user_error),
+                        Err(err) => Err(err),
+                    }
                 }
             }
         }
+        .boxed()
     }
 }
 

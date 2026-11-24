@@ -1,7 +1,7 @@
 //! An async wrapper around a [`diesel::Connection`].
 
-use async_trait::async_trait;
 use diesel::r2d2::R2D2Connection;
+use futures::future::{BoxFuture, FutureExt};
 use std::sync::{Arc, Mutex, MutexGuard};
 use tokio::task;
 
@@ -29,26 +29,29 @@ impl<C> Connection<C> {
     }
 }
 
-#[async_trait]
 impl<Conn> crate::AsyncSimpleConnection<Conn> for Connection<Conn>
 where
     Conn: 'static + R2D2Connection,
 {
     #[inline]
-    async fn batch_execute_async(&self, query: &str) -> Result<(), diesel::result::Error> {
-        let diesel_conn = Connection(self.0.clone());
-        let query = query.to_string();
-        task::spawn_blocking(move || diesel_conn.inner().batch_execute(&query))
-            .await
-            .unwrap() // Propagate panics
+    fn batch_execute_async<'a>(
+        &'a self,
+        query: &'a str,
+    ) -> BoxFuture<'a, Result<(), diesel::result::Error>> {
+        async move {
+            let diesel_conn = Connection(self.0.clone());
+            let query = query.to_string();
+            task::spawn_blocking(move || diesel_conn.inner().batch_execute(&query))
+                .await
+                .unwrap() // Propagate panics
+        }
+        .boxed()
     }
 }
 
-#[async_trait]
 impl<Conn> crate::AsyncR2D2Connection<Conn> for Connection<Conn> where Conn: 'static + R2D2Connection
 {}
 
-#[async_trait]
 impl<Conn> crate::AsyncConnection<Conn> for Connection<Conn>
 where
     Conn: 'static + R2D2Connection,
