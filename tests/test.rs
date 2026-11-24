@@ -135,6 +135,30 @@ async fn test_insert_load_update_delete() {
 }
 
 #[tokio::test]
+async fn test_ping_and_is_broken() {
+    use async_bb8_diesel::AsyncR2D2Connection;
+
+    let crdb = test_start().await;
+
+    let manager = async_bb8_diesel::ConnectionManager::<PgConnection>::new(&crdb.pg_config().url);
+    let pool = bb8::Pool::builder().build(manager).await.unwrap();
+    let mut conn = pool.get().await.unwrap();
+
+    conn.ping_async().await.unwrap();
+    assert!(!conn.is_broken_async().await);
+
+    test_end(crdb).await;
+
+    // The database is gone, so the connection no longer works.
+    conn.ping_async().await.unwrap_err();
+    assert!(conn.is_broken_async().await);
+}
+
+// Checks that `AsyncSimpleConnection` can be used as a trait object.
+#[allow(dead_code)]
+fn simple_connection_is_dyn_compatible(_: &dyn AsyncSimpleConnection<PgConnection>) {}
+
+#[tokio::test]
 async fn test_transaction() {
     let crdb = test_start().await;
 
